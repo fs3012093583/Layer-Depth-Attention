@@ -913,3 +913,14 @@
 - Side effects: Earlier experimental results for the old `depth_memory_qkv_reproj` semantics should no longer be treated as valid for this name.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `depth_memory_qkv_reproj`.
 - Next step: Push the corrected semantics via Git, pull on the server, and rerun the 2000-step benchmark before drawing any conclusion about this branch.
+
+### [Step 078] - 2026-03-31 02:01 CST - Add normalization before current-layer QKV reprojection
+- Request: Update the corrected `depth_memory_qkv_reproj` semantics so the reconstructed historical `Q/K/V` slots are normalized before applying the current layer's projection.
+- Plan: Insert a parameter-free normalization right before `_kv_proj`, verify locally, and rerun the benchmark instead of using the now-obsolete unnormalized attempt.
+- Files touched: `src/layer_depth_attention/model.py`, `dev_log.md`
+- Modification: Added `layer_norm` over the reconstructed `d_model`-dimensional historical `Q/K/V` slot inputs immediately before the current-layer `_kv_proj` inside `LayerDepthQKVReprojAttention`.
+- Rationale: The user expects the historical attention-space vectors to be normalized before current-layer reprojection, analogous to the earlier successful `value_reproj_normed` refinement.
+- Key details: This changes the intended 2000-step QKV-reprojection experiment again; any partially run unnormalized corrected version should be disregarded in favor of the new normalized variant.
+- Side effects: The final intended semantics for `depth_memory_qkv_reproj` are now: separate historical `Q/K/V` slots, current-layer shared `_kv_proj`, and pre-projection normalization.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `depth_memory_qkv_reproj`.
+- Next step: Push this normalization update, pull on the server, and run the benchmark to completion.

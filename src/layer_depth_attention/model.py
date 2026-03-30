@@ -241,6 +241,7 @@ class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
             )
             num_memory_slots = memory_inputs.size(2)
             memory_inputs = memory_inputs.view(x.size(0), seq_len * num_memory_slots, -1)
+            memory_inputs = F.layer_norm(memory_inputs, (memory_inputs.size(-1),))
             reproj_keys, reproj_values = self._kv_proj(memory_inputs)
             reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_memory_slots, self.head_dim)
             reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_memory_slots, self.head_dim)
