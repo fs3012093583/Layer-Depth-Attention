@@ -199,11 +199,6 @@ class LayerDepthValueReprojNormedAttention(MultiHeadAttentionBase):
 
 
 class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
-    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
-        super().__init__(d_model, num_heads, dropout)
-        self.memory_k_proj = nn.Linear(3 * d_model, d_model)
-        self.memory_v_proj = nn.Linear(3 * d_model, d_model)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -240,15 +235,15 @@ class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
                 .contiguous()
                 .view(x.size(0), seq_len, num_past_layers, -1)
             )
-            memory_features = torch.cat(
+            memory_inputs = torch.cat(
                 [past_queries_full, past_keys_full, past_values_full],
-                dim=-1,
+                dim=2,
             )
-            memory_inputs = memory_features.view(x.size(0), seq_len * num_past_layers, -1)
-            reproj_keys = self._split_projected(self.memory_k_proj(memory_inputs))
-            reproj_values = self._split_projected(self.memory_v_proj(memory_inputs))
-            reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
-            reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
+            num_memory_slots = memory_inputs.size(2)
+            memory_inputs = memory_inputs.view(x.size(0), seq_len * num_memory_slots, -1)
+            reproj_keys, reproj_values = self._kv_proj(memory_inputs)
+            reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_memory_slots, self.head_dim)
+            reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_memory_slots, self.head_dim)
 
             memory_scores = (q.unsqueeze(3) * reproj_keys).sum(dim=-1) / math.sqrt(self.head_dim)
             scores = torch.cat([token_scores, memory_scores], dim=-1)

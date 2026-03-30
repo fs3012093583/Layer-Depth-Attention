@@ -891,3 +891,25 @@
 - Side effects: This run adds a new main comparator to the long-budget comparison table.
 - Verification: Local compile check passed before launch.
 - Next step: Pull the latest code on the server and run the 2000-step `depth_memory_qkv_reproj` benchmark.
+
+### [Step 076] - 2026-03-31 01:45 CST - Complete the 2000-step QKV-reprojection run
+- Request: Evaluate the new variant that uses same-position historical `Q/K/V` jointly before current-layer memory adaptation.
+- Plan: Run `depth_memory_qkv_reproj` on the same 2000-step large-scale benchmark and compare it against the existing direct-memory and value-only reprojection variants.
+- Files touched: `dev_log.md`
+- Modification: Completed the remote CUDA run and saved the artifact as `artifacts/wikitext103probe_depth_memory_qkv_reproj_bs8_2000.json`.
+- Rationale: This tests whether richer same-position cross-layer features help beyond the simpler value-only reprojection.
+- Key details: Logged checkpoints were: step 300 `val_loss=8.8302`, step 600 `5.6025`, step 900 `4.6562`, step 1200 `4.2777`, step 1500 `4.1052`, step 1800 `4.0198`, step 2000 `3.9940`. Final metrics were `test_loss=4.2220`, `test_ppl=68.17`. This is slightly better than direct `depth_memory` (`68.89`) and baseline (`69.14`), but worse than `value_reproj` (`66.67`) and `value_reproj_normed` (`66.26`).
+- Side effects: The result suggests that adding historical `Q` and `K` features does not outperform the simpler value-focused reprojection path in the current setup.
+- Verification: Remote 2000-step CUDA benchmark completed and saved metrics.
+- Next step: Keep `qkv_reproj` as an explored but non-leading branch; use the accumulated comparison table to sharpen the mechanism-level conclusions.
+
+### [Step 077] - 2026-03-31 01:58 CST - Correct the QKV-reprojection semantics
+- Request: Adjust `depth_memory_qkv_reproj` to match the intended method definition rather than the earlier concatenated-feature adapter interpretation.
+- Plan: Treat same-position historical `Q`, `K`, and `V` as separate memory slots, project each of them with the current layer's existing `K/V` projection path, and use the resulting `3(i-1)` slots in the attention bank.
+- Files touched: `src/layer_depth_attention/model.py`, `dev_log.md`
+- Modification: Rewrote `LayerDepthQKVReprojAttention` so it no longer concatenates historical `Q/K/V` into one wide feature for dedicated adapters. It now reconstructs each historical `Q`, `K`, and `V` slot in `d_model`, concatenates them along the memory-slot axis, and runs the combined slots through the current layer's `_kv_proj`.
+- Rationale: This matches the user's intended mechanism: use current-layer projection for all same-position historical `Q/K/V` items rather than introducing separate memory projection matrices.
+- Key details: The resulting memory-bank size is now `n + 3(i-1)` for each query position, and the current query still comes from the standard current-layer projection.
+- Side effects: Earlier experimental results for the old `depth_memory_qkv_reproj` semantics should no longer be treated as valid for this name.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `depth_memory_qkv_reproj`.
+- Next step: Push the corrected semantics via Git, pull on the server, and rerun the 2000-step benchmark before drawing any conclusion about this branch.
