@@ -869,3 +869,14 @@
 - Side effects: Future syncs can be done by Git once the server directory is attached to the remote repository.
 - Verification: Local pure-`torch` smoke verified `baseline`, `depth_memory`, `depth_memory_value_reproj`, `depth_memory_value_reproj_normed`, and `depth_memory_qkv_reproj`.
 - Next step: Commit the cleaned repository state, push it to GitHub, then connect the server directory to the same remote so later updates only need `git pull`.
+
+### [Step 074] - 2026-03-31 01:38 CST - Switch the Windows server to Git-based code synchronization
+- Request: Replace ad-hoc SCP syncing with a cleaner push/pull workflow.
+- Plan: Commit and push the cleaned local repository, then attach the existing server directory to the same Git remote and remove stale hand-copied duplicates.
+- Files touched: `dev_log.md`
+- Modification: Pushed commit `89686e8` to `origin/main`, initialized Git inside `D:\Projects\Layer-Depth-Attention` on the server, fetched and hard-reset it to `origin/main`, and removed stale untracked files (`lm_data.py`, `model.py`, `src\\layer_depth_attention\\dev_log.md`) that came from older manual copies.
+- Rationale: This makes future server syncs reproducible and much less error-prone: local changes can now be pushed once and applied remotely with `git pull`.
+- Key details: The server directory was not previously a Git repository; after initialization it now tracks `origin/main`. Local repository status is clean after the push.
+- Side effects: Future experiments should be launched from the Git-tracked server tree, not by copying source files manually.
+- Verification: Local `git push origin main` succeeded; server `git reset --hard origin/main` succeeded; server `git status --short --branch` is clean.
+- Next step: Use `git pull` on the server for subsequent code updates, then continue experiments from the synchronized tree.
