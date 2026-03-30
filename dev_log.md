@@ -924,3 +924,25 @@
 - Side effects: The final intended semantics for `depth_memory_qkv_reproj` are now: separate historical `Q/K/V` slots, current-layer shared `_kv_proj`, and pre-projection normalization.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `depth_memory_qkv_reproj`.
 - Next step: Push this normalization update, pull on the server, and run the benchmark to completion.
+
+### [Step 079] - 2026-03-31 02:06 CST - Diagnose the server's outbound GitHub connectivity issue
+- Request: Resolve the recurring problem where the Windows server appears unable to reach the internet.
+- Plan: Separate basic internet access from GitHub-specific failures by checking IP config, routing, DNS, ICMP reachability, and HTTPS connectivity to multiple domains.
+- Files touched: `dev_log.md`
+- Modification: Verified that the server has healthy general internet access but intermittent or blocked HTTPS connectivity specifically to `github.com`.
+- Rationale: Recent `git pull` failures were blocking the new push/pull sync workflow and needed a concrete root-cause classification.
+- Key details: The server has a valid public IPv4 route (`218.194.25.254` with lower metric than ZeroTier), DNS resolves `github.com` correctly, `ping 1.1.1.1` and `ping github.com` both succeed, and HTTPS to `www.baidu.com` and `www.microsoft.com` returns `200`. However, both `curl -4 https://github.com` and GitHub HTTPS fetches time out on port `443`. This indicates a GitHub-specific HTTPS path issue rather than total outbound network failure.
+- Side effects: Future server syncs cannot reliably depend on direct GitHub access until a proxy, mirror, or alternate route is configured.
+- Verification: Remote `ipconfig`, `route print`, `nslookup github.com`, `ping`, `Invoke-WebRequest`, and `curl -4` checks.
+- Next step: Use a fallback sync path for experiments now, and if needed later set up a stable Git proxy/mirror or a local bare-remote hop over ZeroTier.
+
+### [Step 080] - 2026-03-31 02:13 CST - Establish a ZeroTier-based local Git source for the server
+- Request: Change the sync workflow so the server can pull code from the local machine over ZeroTier instead of relying on unstable GitHub HTTPS access.
+- Plan: Expose a local bare repository over the ZeroTier IP, verify the server can reach it, add it as a remote on the server, and fast-forward the server workspace to that source.
+- Files touched: `dev_log.md`
+- Modification: Created a local bare repo mirror at `/Users/a/Projects/Layer-Depth-Attention-zt.git`, exported it via `git daemon`, verified reachability from the server at `git://10.147.20.35:9418/Layer-Depth-Attention-zt.git`, added `zerotier-local` as a server remote, and reset the server workspace to `zerotier-local/main` at commit `6aee88a`.
+- Rationale: The server has general internet access but unreliable GitHub 443 connectivity; a ZeroTier local source avoids that bottleneck.
+- Key details: The local machine's ZeroTier IPv4 is `10.147.20.35`; server connectivity to `10.147.20.35:9418` now succeeds. The server's `origin` remote can remain for reference, but active code sync can use `zerotier-local`.
+- Side effects: The local `git daemon` must be running for the server to fetch from the ZeroTier source.
+- Verification: Server `git ls-remote git://10.147.20.35:9418/Layer-Depth-Attention-zt.git` succeeded; server `git reset --hard zerotier-local/main` succeeded.
+- Next step: Use `git push zerotier-local main` locally after code changes, then `git fetch zerotier-local && git reset --hard zerotier-local/main` on the server before launching experiments.
