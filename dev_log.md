@@ -880,3 +880,14 @@
 - Side effects: Future experiments should be launched from the Git-tracked server tree, not by copying source files manually.
 - Verification: Local `git push origin main` succeeded; server `git reset --hard origin/main` succeeded; server `git status --short --branch` is clean.
 - Next step: Use `git pull` on the server for subsequent code updates, then continue experiments from the synchronized tree.
+
+### [Step 075] - 2026-03-31 01:40 CST - Launch the QKV-reprojection benchmark via Git sync
+- Request: Start the planned experiment for the variant that uses same-position historical `Q/K/V` together, then adapts them into current-layer memory entries.
+- Plan: Use the new Git-based workflow to sync the current code to the server, then run `depth_memory_qkv_reproj` under the same large-scale 2000-step benchmark used for the other main comparisons.
+- Files touched: `dev_log.md`
+- Modification: Logged the experiment launch plan for the `depth_memory_qkv_reproj` branch.
+- Rationale: This tests whether using richer same-position cross-layer features (`Q`, `K`, and `V` jointly) improves over the existing value-only reprojection variants.
+- Key details: The target configuration is `wikitext-103-probe`, `d_model=384`, `num_layers=16`, `seq_len=256`, `batch_size=8`, `steps=2000`, with progress printed every 300 steps.
+- Side effects: This run adds a new main comparator to the long-budget comparison table.
+- Verification: Local compile check passed before launch.
+- Next step: Pull the latest code on the server and run the 2000-step `depth_memory_qkv_reproj` benchmark.
