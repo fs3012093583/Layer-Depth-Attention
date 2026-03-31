@@ -71,6 +71,7 @@ class CausalSelfAttention(MultiHeadAttentionBase):
 
 
 class LayerDepthMemoryAttention(MultiHeadAttentionBase):
+    #‘’通过在注意力计算中直接拼接当前层的token scores和过去层的memory scores来实现层深度记忆机制，使用一个q
     def forward(
         self,
         x: torch.Tensor,
@@ -87,9 +88,14 @@ class LayerDepthMemoryAttention(MultiHeadAttentionBase):
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
+
             past_keys = torch.stack([item[0] for item in past_kv], dim=3)
             past_values = torch.stack([item[1] for item in past_kv], dim=3)
+
+            # 使用相同的q来计算token_scores和memory_scores
             memory_scores = (q.unsqueeze(3) * past_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            
+            #直接拼接token_scores和memory_scores，进行softmax
             scores = torch.cat([token_scores, memory_scores], dim=-1)
             weights = torch.softmax(scores, dim=-1)
             weights = self.dropout(weights)

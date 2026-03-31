@@ -64,6 +64,7 @@
 | `attn_residuals` | 3.8722 | 48.05 | 4.1046 | 60.62 |
 | `attn_residuals_value_reproj_normed` | 3.8653 | 47.72 | 4.1274 | 62.01 |
 | `depth_memory_value_reproj_normed_ffn_qattn` | 4.0044 | 54.84 | 4.2547 | 70.44 |
+| `depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq` | 4.0348 | 56.53 | 4.2716 | 71.63 |
 
 ## Current Reading
 
@@ -73,6 +74,7 @@
 - 双查询方向本身有信号，但在当前主配置下，“全层共享同列查询”优于“每层独立同列查询”。
 - 当前最强的非 `Attention Residuals` 版本仍然是 `depth_memory_value_reproj_normed`。
 - 直接用退化版 q-attention 替代 FFN，在当前文本主配置下没有带来收益；即使长训到 `2000 step`，最终仍略差于 `baseline`。
+- 把“双 q”同时推到 attention 与 FFN 两处会进一步变差；这条更重的双层双 q 版本目前是已验证但不值得继续堆预算的分支。
 - `Attention Residuals` remains the strongest comparator in the current benchmark.
 
 ## CIFAR100 Probe

@@ -1149,3 +1149,14 @@
 - 影响：旧实验结果保持不变，新结构作为单独方法存在，便于后续直接做服务器实验而不污染已有结论。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 smoke test `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq')` 前向与反向通过，输出形状 `(2, 16, 128)`，参数量 `143488`。
 - 下一步：如果继续，就把这个新分支同步到服务器，在文本主配置上先跑一轮短程 probe，再决定是否拉到 `2000 step`。
+
+### [步骤 099] - 2026-03-31 12:41 CST - 完成 attention 与 FFN 同时使用双 q 的 2000 步长训
+- 请求：用户不做短程 probe，直接要求把新分支 `depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq` 拉到 `2000 step`。
+- 计划：先提交本地改动，再通过 `git push` 同步；由于服务器 `origin` 链路卡顿，改用 `zerotier-local` 拉取新提交后启动训练。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了这条“双 q + 双层注意力”新分支的完整长训结果。
+- 原因：用户想直接看最终性能，不想先做 probe。
+- 关键信息：配置为 `wikitext-103-probe`、`d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=8`、`steps=2000`、`eval_interval=300`。验证集依次为 `step 300 val_loss=8.8307`、`600=5.6330`、`900=4.7048`、`1200=4.3240`、`1500=4.1481`、`1800=4.0689`、`2000=4.0348`。最终 `test_loss=4.2716`、`test_ppl=71.63`。
+- 影响：这条“attention 和 FFN 都拆成行内/列内双 q”的版本可以正常收敛，但最终不仅没有超过 `value_reproj_normed (66.26)`，还差于 `baseline (69.14)`。说明把双 q 同时推到 attention 和 FFN 两处，在当前文本主配置下会进一步恶化优化或泛化效果。
+- 验证：服务器生成了 `artifacts/wikitext103probe_value_reproj_normed_dualq_ffn_qattn_dualq_2000.json`；训练日志和最终指标完整。
+- 下一步：如果继续沿 FFN 替代线推进，更合理的是只在 attention 侧保留双 q，把 FFN 替代层改回更弱的增量模块或加 gate，而不是继续叠满双 q。
