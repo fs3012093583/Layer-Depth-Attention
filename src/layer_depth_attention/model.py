@@ -226,26 +226,16 @@ class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
+            past_keys = torch.stack([item[0] for item in past_kv], dim=3)
             past_values = torch.stack([item[1] for item in past_kv], dim=3)
-            num_past_layers = past_values.size(3)
-            past_values_full = (
-                past_values.permute(0, 2, 3, 1, 4)
-                .contiguous()
-                .view(x.size(0), seq_len, num_past_layers, -1)
-            )
-            reproj_inputs = past_values_full.view(x.size(0), seq_len * num_past_layers, -1)
-            reproj_keys, reproj_values = self._kv_proj(reproj_inputs)
-            reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
-            reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
-
-            memory_scores = (q_col.unsqueeze(3) * reproj_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            memory_scores = (q_col.unsqueeze(3) * past_keys).sum(dim=-1) / math.sqrt(self.head_dim)
             scores = torch.cat([token_scores, memory_scores], dim=-1)
             weights = torch.softmax(scores, dim=-1)
             weights = self.dropout(weights)
             token_weights = weights[..., :seq_len]
             memory_weights = weights[..., seq_len:]
             token_context = torch.matmul(token_weights, v)
-            memory_context = (memory_weights.unsqueeze(-1) * reproj_values).sum(dim=3)
+            memory_context = (memory_weights.unsqueeze(-1) * past_values).sum(dim=3)
             attn = token_context + memory_context
         else:
             weights = torch.softmax(token_scores, dim=-1)

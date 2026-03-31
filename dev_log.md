@@ -968,3 +968,14 @@
 - Side effects: This adds one new global projection matrix to the model only when the dual-query attention type is selected.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `TinyDecoderLM(attention_type='depth_memory_value_reproj_dualq')`.
 - Next step: Commit the dual-query implementation, sync it to the server through ZeroTier, and run the large-scale benchmark to see whether separating row/column queries improves over `value_reproj`.
+
+### [Step 083] - 2026-03-31 03:10 CST - Correct the dual-query memory path to direct historical K/V reuse
+- Request: Update the new dual-query variant so the same-column branch uses previously computed historical `K/V` directly instead of reprojecting them with the current layer.
+- Plan: Keep the dual-query design, but replace the memory-side reprojection path with direct same-position historical `K/V` reuse; then re-run local compile and smoke checks before any server experiment.
+- Files touched: `src/layer_depth_attention/model.py`, `dev_log.md`
+- Modification: Changed `LayerDepthValueReprojDualQAttention` so token scores still use the current layer's row query, memory scores use the shared column query, and the memory bank now consumes stacked historical `K/V` directly with no extra `_kv_proj` on the column branch.
+- Rationale: The user clarified that the dual-query experiment should isolate query separation only; historical column memories should remain the original projected `K/V` from earlier layers.
+- Key details: This makes the branch semantically closer to `depth_memory` plus a shared column-query projection, rather than a reprojection-based memory variant. The attention-type name is unchanged for continuity, but its intended meaning is now "dual-query direct depth memory."
+- Side effects: Earlier expectations for this variant should no longer compare it directly to `value_reproj`; the current experiment now isolates the effect of using different row/column query projections.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `TinyDecoderLM(attention_type='depth_memory_value_reproj_dualq')`.
+- Next step: Commit the corrected dual-query semantics, sync to the server, and run the large-scale benchmark.
