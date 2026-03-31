@@ -19,7 +19,12 @@
   Same-position historical `V` is reconstructed to model space and then reprojected through the current layer `K/V` projection path before entering the memory bank.
 
 - `depth_memory_value_reproj_normed`
-  Same as `depth_memory_value_reproj`, but the reconstructed historical `V` is normalized before current-layer reprojection.
+  历史 `V` 先做归一化，再通过当前层的 `K/V` 路径重投影。
+  当前实现中，行内 token 注意力使用 `q_row`，同列历史 memory 检索使用独立的 `q_col`。
+
+- `depth_memory_directkv_dualq`
+  当前层正常生成 `q_row/k/v`，同列历史部分直接复用前面层已经算好的 `k/v`。
+  只额外学习一个 `q_col` 用于同列历史检索，不对历史 `V/K` 做任何新的映射。
 
 - `depth_memory_qkv_reproj`
   Same-position historical `Q/K/V` are treated as separate memory slots, normalized, and then passed through the current layer `K/V` projection path.
@@ -76,6 +81,21 @@
 - 直接用退化版 q-attention 替代 FFN，在当前文本主配置下没有带来收益；即使长训到 `2000 step`，最终仍略差于 `baseline`。
 - 把“双 q”同时推到 attention 与 FFN 两处会进一步变差；这条更重的双层双 q 版本目前是已验证但不值得继续堆预算的分支。
 - `Attention Residuals` remains the strongest comparator in the current benchmark.
+
+## Full WikiText-103 Larger Setting
+
+- Dataset: `wikitext-103-raw-v1`
+- Model: `d_model=512`, `num_layers=20`, `num_heads=8`, `seq_len=256`
+- Budget: `500` steps, `batch_size=2`, `grad_accum_steps=4`
+
+| Method | Val Loss | Test Loss | Test PPL |
+|---|---:|---:|---:|
+| `baseline` | 15.5705 | 14.3806 | 1759555.61 |
+| `depth_memory_value_reproj_normed` | 15.6581 | 14.3122 | 1643285.39 |
+
+- Reading:
+  - 在完整 `WikiText-103` 和更大模型下，`value_reproj_normed` 的 `test_loss/test_ppl` 继续优于 `baseline`。
+  - 但验证集略差，说明当前 `500` 步预算下这组优势还不够稳，需要更长训练或更多随机种子确认。
 
 ## CIFAR100 Probe
 

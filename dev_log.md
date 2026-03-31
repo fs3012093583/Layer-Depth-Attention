@@ -1160,3 +1160,55 @@
 - 影响：这条“attention 和 FFN 都拆成行内/列内双 q”的版本可以正常收敛，但最终不仅没有超过 `value_reproj_normed (66.26)`，还差于 `baseline (69.14)`。说明把双 q 同时推到 attention 和 FFN 两处，在当前文本主配置下会进一步恶化优化或泛化效果。
 - 验证：服务器生成了 `artifacts/wikitext103probe_value_reproj_normed_dualq_ffn_qattn_dualq_2000.json`；训练日志和最终指标完整。
 - 下一步：如果继续沿 FFN 替代线推进，更合理的是只在 attention 侧保留双 q，把 FFN 替代层改回更弱的增量模块或加 gate，而不是继续叠满双 q。
+
+### [步骤 100] - 2026-03-31 13:18 CST - 完成更大模型与完整 WikiText-103 的文本对比
+- 请求：用户要求把实验切到更大的模型和更大的数据集做测试。
+- 计划：使用服务器上已有的完整 `wikitext-103-raw-v1`，先完成第一次 GPT-2 分词缓存，再在更大模型配置下顺序比较 `baseline` 和 `depth_memory_value_reproj_normed`。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了完整 `WikiText-103` 上的一轮大配置对比结果。
+- 原因：此前主线结果主要建立在 `wikitext-103-probe` 上，用户希望确认方法在更大数据集和更大模型上的表现。
+- 关键信息：正式配置为 `wikitext-103-raw-v1`、`d_model=512`、`num_layers=20`、`seq_len=256`、`batch_size=2`、`grad_accum_steps=4`、`steps=500`、`eval_interval=100`、`eval_batches=10`。  
+  `baseline` 最终 `val_loss=15.5705`、`test_loss=14.3806`、`test_ppl=1759555.61`。  
+  `depth_memory_value_reproj_normed` 最终 `val_loss=15.6581`、`test_loss=14.3122`、`test_ppl=1643285.39`。
+- 影响：在“更大模型 + 更大数据集”的完整 WikiText-103 设定下，`value_reproj_normed` 的测试集指标再次优于 `baseline`，但验证集略差。这说明方法在更大规模上仍然保有正信号，不过当前 `500 step` 预算下优势还不算大。
+- 验证：服务器生成了 `artifacts/wikitext103_full_baseline_20l_512d_500.json` 与 `artifacts/wikitext103_full_value_reproj_normed_20l_512d_500.json`；训练均已完成。
+- 下一步：如果继续，应优先把这组完整 WikiText-103 大设定拉到更长训练预算，或者补一个第二随机种子，验证这点优势是否稳定。
+
+### [步骤 101] - 2026-03-31 13:27 CST - 将 value_reproj_normed 主方法切换为双 q 版本
+- 请求：用户要求把 `value_reproj_normed` 这个方法本身换成“行和列使用不同 q”的版本。
+- 计划：不新增新名字，直接把 `depth_memory_value_reproj_normed` 的实现映射改为双查询 attention，并做本地编译与 smoke test。
+- 涉及文件：`src/layer_depth_attention/model.py`, `experiment_notes.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：将 `depth_memory_value_reproj_normed` 的实例化从 `LayerDepthValueReprojNormedAttention` 切换为 `LayerDepthValueReprojNormedDualQAttention`；同步更新方法说明。
+- 原因：用户明确希望当前主方法本身采用“同行 `q_row`、同列 `q_col`”的设计，而不是保留原来单 `q` 的实现。
+- 关键信息：这次改动只替换 `value_reproj_normed` 的底层 attention 实现，不改训练入口名字；因此后续凡是使用 `attention_type='depth_memory_value_reproj_normed'` 的实验，都会自动走双 q 版本。
+- 影响：历史结果仍然是旧实现的记录；从这一步开始，`value_reproj_normed` 这一名字对应的是新的双 q 语义，需要后续重跑实验时注意区分。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed')` 前向和反向 smoke test 通过，输出形状 `(2, 16, 128)`，参数量 `225920`。
+- 下一步：如果继续，应直接用新的 `value_reproj_normed` 主方法在文本配置上重跑基准，确认“双 q 替换版”的真实效果。
+
+### [步骤 102] - 2026-03-31 13:34 CST - 将 value_reproj_normed 进一步收紧为“只学 q_col、历史 kv 直接复用”
+- 请求：用户进一步明确当前主方法不应再包含任何“把历史 `V` 重映射成新的 `K/V`”的过程；除了额外学习的 `q_col`，不希望再引入历史 memory 侧的新映射参数。
+- 计划：把 `value_reproj_normed` 的实现改成最简双 q 版：当前层正常使用 `q_row/k/v`，同列历史直接复用旧层 `k/v`，只额外学习一个 `q_col`，并在关键逻辑处补中文注释。
+- 涉及文件：`src/layer_depth_attention/model.py`, `experiment_notes.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：重写 `LayerDepthValueReprojNormedAttention` 的核心逻辑；删除历史 `V -> 新 K/V` 的重投影路径；保留 `q_row` 查询当前层 token、`q_col` 查询同列历史；恢复 `depth_memory_value_reproj_normed` 到这个新的极简实现。
+- 原因：前一步虽然已经切成双 q，但仍然保留了历史 `V` 重投影，和用户想要的“只额外学习 q_col，历史 k/v 原样复用”不一致。
+- 关键信息：现在的 `value_reproj_normed` 语义是：  
+  1. 当前层标准 token attention 用 `q_row` 查当前层 `k`；  
+  2. 同列历史 memory 用 `q_col` 查旧层缓存的 `k`；  
+  3. memory 输出直接聚合旧层缓存的 `v`；  
+  4. 不再做任何 `V -> 新 K/V` 的重映射。
+- 影响：从这一步开始，`value_reproj_normed` 已经不再是“归一化后再重投影”的实现，而是一个“行列双 q + 直接复用历史 kv”的极简版本。旧实验结果需要视为历史版本结果，后续必须重跑。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed')` 前向与反向 smoke test 通过，输出形状 `(2, 16, 128)`，参数量 `225920`。
+- 下一步：如果继续，就应以这个真正满足约束的新 `value_reproj_normed` 为基础，重跑文本主基准。
+
+### [步骤 103] - 2026-03-31 13:41 CST - 为“直接复用历史 kv 的双 q 版”单独命名
+- 请求：用户要求继续跑实验，但同时强调当前这个版本必须换一个名字，避免和旧版 `value_reproj_normed` 混淆。
+- 计划：把 `value_reproj_normed` 恢复为“归一化后再重投影”的语义；把“当前层 `q_row/k/v` + 同列历史直接复用 `k/v` + 只学习 `q_col`”这版单独命名成新方法，然后再用新名字开跑。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `experiment_notes.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增训练入口名字 `depth_memory_directkv_dualq`；将 `depth_memory_value_reproj_normed` 的映射恢复到重投影双 q 版本；把直接复用历史 `kv` 的极简双 q 版本单独命名并补充方法说明。
+- 原因：旧结果已经大量使用 `value_reproj_normed` 这个名字，不能再让它同时指代另一种“直接复用历史 kv”的实现。
+- 关键信息：从这一步开始：  
+  1. `depth_memory_value_reproj_normed` = 历史 `V` 归一化后再走当前层 `K/V` 路径重投影；  
+  2. `depth_memory_directkv_dualq` = 当前层 `q_row/k/v` + 同列历史直接复用旧 `k/v` + 只学习 `q_col`。
+- 影响：新旧语义终于彻底分开，后续实验结果不会再污染之前的 `value_reproj_normed` 结论。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed')` 与 `TinyDecoderLM(attention_type='depth_memory_directkv_dualq')` 的前向/反向 smoke test 均通过，输出形状均为 `(2, 16, 128)`，参数量均为 `225920`。
+- 下一步：把新方法 `depth_memory_directkv_dualq` 同步到服务器，在文本主配置上直接跑 `2000 step`。

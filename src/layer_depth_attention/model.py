@@ -113,6 +113,7 @@ class LayerDepthMemoryAttention(MultiHeadAttentionBase):
 
 
 class LayerDepthValueReprojAttention(MultiHeadAttentionBase):
+    #把过去的values进行线性变换后再计算memory_scores，其他部分同LayerDepthMemoryAttention，但是横纵使用不同的w
     def forward(
         self,
         x: torch.Tensor,
@@ -141,6 +142,7 @@ class LayerDepthValueReprojAttention(MultiHeadAttentionBase):
             reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
             reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
 
+            #同一个q
             memory_scores = (q.unsqueeze(3) * reproj_keys).sum(dim=-1) / math.sqrt(self.head_dim)
             scores = torch.cat([token_scores, memory_scores], dim=-1)
             weights = torch.softmax(scores, dim=-1)
@@ -158,16 +160,29 @@ class LayerDepthValueReprojAttention(MultiHeadAttentionBase):
         return self.out_proj(self._merge_heads(attn)), (k, v, q)
 
 
-class LayerDepthValueReprojNormedAttention(MultiHeadAttentionBase):
+class LayerDepthDirectKVDualQAttention(MultiHeadAttentionBase):
+    # 行内使用当前层 q_row，同列历史使用单独学习的 q_col。
+    # 历史 k/v 直接复用，不再做任何重投影。
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        dropout: float,
+    ) -> None:
+        super().__init__(d_model, num_heads, dropout)
+        self.column_q_proj = nn.Linear(d_model, d_model)
+
     def forward(
         self,
         x: torch.Tensor,
         past_kv: Optional[List[KVCache]] = None,
     ) -> Tuple[torch.Tensor, KVCache]:
-        q, k, v = self._split_qkv(x)
+        q_row, k, v = self._split_qkv(x)
+        q_col = self._split_projected(self.column_q_proj(x))
         seq_len = x.size(1)
 
-        token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # 当前层标准 causal attention，仍然由 q_row 查询当前层 k。
+        token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
             diagonal=1,
@@ -175,37 +190,28 @@ class LayerDepthValueReprojNormedAttention(MultiHeadAttentionBase):
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
+            # 同列历史部分直接复用旧层已经算好的 k/v，只额外学习 q_col。
+            past_keys = torch.stack([item[0] for item in past_kv], dim=3)
             past_values = torch.stack([item[1] for item in past_kv], dim=3)
-            num_past_layers = past_values.size(3)
-            past_values_full = (
-                past_values.permute(0, 2, 3, 1, 4)
-                .contiguous()
-                .view(x.size(0), seq_len, num_past_layers, -1)
-            )
-            reproj_inputs = past_values_full.view(x.size(0), seq_len * num_past_layers, -1)
-            reproj_inputs = F.layer_norm(reproj_inputs, (reproj_inputs.size(-1),))
-            reproj_keys, reproj_values = self._kv_proj(reproj_inputs)
-            reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
-            reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
-
-            memory_scores = (q.unsqueeze(3) * reproj_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            memory_scores = (q_col.unsqueeze(3) * past_keys).sum(dim=-1) / math.sqrt(self.head_dim)
             scores = torch.cat([token_scores, memory_scores], dim=-1)
             weights = torch.softmax(scores, dim=-1)
             weights = self.dropout(weights)
             token_weights = weights[..., :seq_len]
             memory_weights = weights[..., seq_len:]
             token_context = torch.matmul(token_weights, v)
-            memory_context = (memory_weights.unsqueeze(-1) * reproj_values).sum(dim=3)
+            memory_context = (memory_weights.unsqueeze(-1) * past_values).sum(dim=3)
             attn = token_context + memory_context
         else:
             weights = torch.softmax(token_scores, dim=-1)
             weights = self.dropout(weights)
             attn = torch.matmul(weights, v)
 
-        return self.out_proj(self._merge_heads(attn)), (k, v, q)
+        return self.out_proj(self._merge_heads(attn)), (k, v, q_row)
 
 
 class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
+    #双q，一个用于计算token_scores，一个用于计算memory_scores
     def __init__(
         self,
         d_model: int,
@@ -252,6 +258,7 @@ class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
 
 
 class LayerDepthValueReprojNormedDualQAttention(MultiHeadAttentionBase):
+    #加归一化
     def __init__(
         self,
         d_model: int,
@@ -309,6 +316,7 @@ class LayerDepthValueReprojNormedDualQAttention(MultiHeadAttentionBase):
 
 
 class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
+    #浅层kVQ都看作输入做翻倍线性变换，使用一个q
     def forward(
         self,
         x: torch.Tensor,
@@ -374,6 +382,7 @@ class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
 
 
 class LayerDepth2DPrefixAttention(MultiHeadAttentionBase):
+    #二维注意力机制，单q
     def forward(
         self,
         x: torch.Tensor,
@@ -419,6 +428,7 @@ class LayerDepth2DPrefixAttention(MultiHeadAttentionBase):
 
 
 class Top1MoE(nn.Module):
+    # 在每个位置上使用一个路由器网络为输入分配权重，并选择一个专家进行计算，最后将专家输出乘以对应的权重作为最终输出
     def __init__(self, d_model: int, hidden_dim: int, num_experts: int, dropout: float) -> None:
         super().__init__()
         self.router = nn.Linear(d_model, num_experts)
@@ -585,7 +595,9 @@ class TransformerBlock(nn.Module):
         elif attention_type == "depth_memory_value_reproj":
             self.attn = LayerDepthValueReprojAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj_normed":
-            self.attn = LayerDepthValueReprojNormedAttention(d_model, num_heads, dropout)
+            self.attn = LayerDepthValueReprojNormedDualQAttention(d_model, num_heads, dropout)
+        elif attention_type == "depth_memory_directkv_dualq":
+            self.attn = LayerDepthDirectKVDualQAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj_dualq":
             self.attn = LayerDepthValueReprojDualQAttention(
                 d_model,
