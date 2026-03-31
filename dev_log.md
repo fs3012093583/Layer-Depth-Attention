@@ -1045,3 +1045,41 @@
 - 影响：项目现在同时具备文本与视觉两条实验入口，但两者代码相互独立，减少互相污染。
 - 验证：`python -m py_compile src/layer_depth_attention/vision_model.py train_cifar100_vit.py`；本地前向/反向 smoke test 通过，`baseline` 与 `depth_memory_value_reproj_normed` 都能输出 `(2, 100)`。
 - 下一步：提交当前改动，同步到服务器，在 CIFAR100 上先跑一轮短程 probe。
+
+### [步骤 090] - 2026-03-31 09:46 CST - 完成 CIFAR100 首轮短程探测
+- 请求：在 CIFAR100 上先跑一轮小规模实验，看看视觉基准能不能正常起量，以及当前变体有没有初步信号。
+- 计划：在同一套小型 ViT 配置上并行运行 `baseline` 与 `depth_memory_value_reproj_normed`，各训 `5` 个 epoch，比较测试集 loss 和 accuracy。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录了服务器端两条 CIFAR100 probe 的结果。
+- 原因：先用短程实验判断这条视觉基准是否可用，再决定是否值得拉长训练预算。
+- 关键信息：配置为 `CIFAR100`、`d_model=256`、`num_layers=6`、`num_heads=8`、`patch_size=4`、`batch_size=128`、`epochs=5`。结果如下：
+  - `baseline`：`test_loss=2.5585`，`test_acc=0.3375`
+  - `depth_memory_value_reproj_normed`：`test_loss=2.5765`，`test_acc=0.3336`
+- 影响：视觉版 `value_reproj_normed` 能正常训练，但在当前短预算下还没有超过 baseline；需要更长训练或更合适的视觉超参后再下结论。
+- 验证：服务器生成了 `artifacts/cifar100_baseline_probe.json` 与 `artifacts/cifar100_value_reproj_normed_probe.json`。
+- 下一步：如果继续做 CIFAR100，优先把训练拉长到 `20~50` epoch 再看趋势，而不是直接下方法无效结论。
+
+### [步骤 091] - 2026-03-31 10:36 CST - 完成 CIFAR100 的 50 epoch 对比
+- 请求：把 `baseline` 和 `depth_memory_value_reproj_normed` 在 CIFAR100 上一起拉到 `50` 个 epoch，观察长训练下的真实趋势。
+- 计划：保持与 probe 相同的小型 ViT 配置，只把训练轮数从 `5` 提到 `50`，并行运行两条实验。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录两条 `50 epoch` 结果及其关键趋势。
+- 原因：5 个 epoch 只能说明训练入口能跑通，不足以判断视觉任务上的最终趋势。
+- 关键信息：配置保持为 `d_model=256`、`num_layers=6`、`num_heads=8`、`patch_size=4`、`batch_size=128`。最终结果：
+  - `baseline`：`test_loss=2.6447`，`test_acc=0.5216`
+  - `depth_memory_value_reproj_normed`：`test_loss=2.6788`，`test_acc=0.5145`
+  两条方法都在约 `epoch 46~50` 达到各自最高测试精度区间，但最终仍是 baseline 略优。
+- 影响：在当前 CIFAR100 小型 ViT 设定下，`value_reproj_normed` 还没有复现语言模型中的优势；至少在这组视觉配置上并不占优。
+- 验证：服务器生成了 `artifacts/cifar100_baseline_50ep.json` 与 `artifacts/cifar100_value_reproj_normed_50ep.json`，两条训练进程均已结束。
+- 下一步：如果继续深挖视觉任务，应优先调整视觉侧超参或结构适配，而不是直接照搬文本版结论。
+
+### [步骤 092] - 2026-03-31 10:44 CST - 新增二维前缀文本注意力分支
+- 请求：回到文本任务，改成更激进的二维注意力区域。用户的约束是：每个位置不仅看当前层左边 token，还看所有更浅层中该位置左边的所有元素，也就是 layer-token 平面上的“左边或下面”区域。
+- 计划：新增一个文本 attention 变体，把当前层的标准 causal token 区和所有浅层的前缀 token 区拼成统一注意力空间，并沿用现有训练入口做后续实验。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `dev_log.md`
+- 修改内容：新增 `depth_memory_2d_prefix` 分支，实现当前 query 同时访问当前层 `1..k` 的 token，以及所有更浅层中 `1..k` 的 token；并把新分支加入训练脚本的 `attention_type` 选项。
+- 原因：用户希望把 depth memory 从“同列检索”扩展成真正的二维左下三角检索区域。
+- 关键信息：当前实现中，历史部分直接复用过去层缓存的 `K/V`，并用位置掩码保证第 `k` 个 query 只能看到各浅层中的前缀 `1..k`，不会越过右侧未来位置。
+- 影响：这条分支的 memory 空间会从按层 `i-1` 个同列槽位，扩展到按层前缀累计的 `k(i-1)` 个槽位，计算量显著增加。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`；本地前向/反向 smoke test 通过，`TinyDecoderLM(attention_type='depth_memory_2d_prefix')` 能输出 `(2, 16, 128)`。
+- 下一步：如果继续，就把这条分支同步到服务器，在文本基准上先跑一轮短程 probe。

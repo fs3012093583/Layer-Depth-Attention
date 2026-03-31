@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "baseline",
             "depth_memory",
+            "depth_memory_2d_prefix",
             "depth_memory_qkv_reproj",
             "depth_memory_value_reproj",
             "depth_memory_value_reproj_normed",

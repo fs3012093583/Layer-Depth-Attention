@@ -309,6 +309,51 @@ class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
         return self.out_proj(self._merge_heads(attn)), (k, v, q)
 
 
+class LayerDepth2DPrefixAttention(MultiHeadAttentionBase):
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[List[KVCache]] = None,
+    ) -> Tuple[torch.Tensor, KVCache]:
+        q, k, v = self._split_qkv(x)
+        seq_len = x.size(1)
+        token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
+
+        if past_kv:
+            batch_size = x.size(0)
+            num_past_layers = len(past_kv)
+            past_keys = torch.stack([item[0] for item in past_kv], dim=2)
+            past_values = torch.stack([item[1] for item in past_kv], dim=2)
+            past_keys = past_keys.reshape(batch_size, self.num_heads, num_past_layers * seq_len, self.head_dim)
+            past_values = past_values.reshape(batch_size, self.num_heads, num_past_layers * seq_len, self.head_dim)
+
+            memory_scores = torch.matmul(q, past_keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            prefix_positions = torch.arange(seq_len, device=x.device).repeat(num_past_layers)
+            query_positions = torch.arange(seq_len, device=x.device)
+            memory_mask = prefix_positions.unsqueeze(0) > query_positions.unsqueeze(1)
+            memory_scores = memory_scores.masked_fill(memory_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+
+            all_scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = torch.softmax(all_scores, dim=-1)
+            weights = self.dropout(weights)
+            token_weights = weights[..., :seq_len]
+            memory_weights = weights[..., seq_len:]
+            token_context = torch.matmul(token_weights, v)
+            memory_context = torch.matmul(memory_weights, past_values)
+            attn = token_context + memory_context
+        else:
+            weights = torch.softmax(token_scores, dim=-1)
+            weights = self.dropout(weights)
+            attn = torch.matmul(weights, v)
+
+        return self.out_proj(self._merge_heads(attn)), (k, v, q)
+
+
 class Top1MoE(nn.Module):
     def __init__(self, d_model: int, hidden_dim: int, num_experts: int, dropout: float) -> None:
         super().__init__()
@@ -369,6 +414,8 @@ class TransformerBlock(nn.Module):
             )
         elif attention_type == "depth_memory_qkv_reproj":
             self.attn = LayerDepthQKVReprojAttention(d_model, num_heads, dropout)
+        elif attention_type == "depth_memory_2d_prefix":
+            self.attn = LayerDepth2DPrefixAttention(d_model, num_heads, dropout)
         else:
             raise ValueError(f"Unsupported attention_type: {attention_type}")
         self.mlp_norm = nn.LayerNorm(d_model)
