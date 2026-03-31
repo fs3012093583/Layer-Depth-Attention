@@ -1,7 +1,61 @@
-# Python
+
+# Python cache
 __pycache__/
 *.py[cod]
+*.so
 *$py.class
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# VSCode/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data/model artifacts
+artifacts/
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.npz
+*.npy
+*.onnx
+*.log
+*.tensorboard
+*.mlruns
+
+# Environment/venv
+.env/
+env/
+venv/
+.venv/
+ENV/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# External data
+external_data/
+
+# Ignore logs and outputs
+*.log
+*.out
+*.tmp
+*.bak
+
+# Misc
+*.json
+
 
 # OS
 .DS_Store

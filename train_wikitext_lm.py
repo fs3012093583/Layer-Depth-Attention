@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
         "--attention-type",
         choices=[
             "baseline",
+            "dual_axis_memory",
+            "dual_axis_full",
             "depth_memory",
             "depth_memory_2d_prefix",
             "depth_memory_qkv_reproj",
@@ -54,6 +56,7 @@ def parse_args() -> argparse.Namespace:
             "depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq",
             "depth_memory_value_reproj_dualq",
             "attn_residuals",
+            "attn_residuals_dual_axis",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",
             "attn_residuals_moe",

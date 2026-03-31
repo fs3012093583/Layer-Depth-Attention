@@ -7,6 +7,13 @@
 - Protected areas: Do not alter the stored server credential reference; do not overwrite unrelated remote directories; keep the existing method note intact unless experiment results require documentation updates; do not regress the synthetic benchmark scripts while adding the LM benchmark path.
 - Risks / assumptions: `datasets` and `tokenizers` are not installed remotely, but `transformers` is available; `GPT2Tokenizer.from_pretrained('gpt2')` cannot download remotely due network restrictions, so local asset vendoring is required; early standard-benchmark runs should stay small enough to validate the pipeline before spending longer GPU time.
 
+## Current Task Lens
+- Goal: Run longer-context (`seq_len=512`) WikiText-2 comparisons for the current method family and record each experiment cleanly for thesis use.
+- Active scope: Re-run the current text-LM comparison set at 4x sequence length, preserve comparable training settings where feasible, and keep a precise log of each launched/finished experiment.
+- Constraints: The remote GPU is an RTX 4060 Ti 16GB, so `seq_len=512` may require reducing `batch_size` or adjusting accumulation to avoid OOM; all experiment launches and outcomes must be recorded in project memory; from this point onward experiment logs should be written in Chinese.
+- Protected areas: Preserve existing method names and earlier `seq_len=128` references; do not overwrite prior artifacts; do not claim direct comparability if the batch configuration must change for memory reasons.
+- Risks / assumptions: The user referred to "5 experiments"; current concrete distinct methods on this WikiText line are `baseline`, `attn_residuals`, `dual_axis_memory`, and `attn_residuals_dual_axis`. I will treat the fifth experiment as an additional repeat of the prior dual-axis causal placement only if needed by the user's counting, but will first try to resolve the exact runnable set through existing results and naming consistency.
+
 ## Action History
 
 ### [Step 001] - 2026-03-30 18:28 CST - Bootstrap log and project document
@@ -217,6 +224,173 @@
 - Side effects: The large-setting story is now clearer: `depth_memory` appears to improve early convergence on this harder task, while both residual-preserving models eventually solve it given enough optimization budget.
 - Verification: Remote CUDA run completed successfully and saved the baseline metrics artifact.
 - Next step: To claim a robust advantage, run multiple seeds or compare sample-efficiency at fixed intermediate step budgets rather than only final accuracy.
+
+### [Step 020] - 2026-03-31 13:05 CST - Reframe into graduation experiment matrix
+- Request: Design the next set of graduation experiments so standard mechanisms and the user's custom mechanism can be compared side by side.
+- Plan: Re-read project memory and training entrypoints, identify which baselines already exist, then produce a staged experiment matrix covering standard attention, stronger standard baselines, the proposed method, and key ablations.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Reopened project memory, reviewed `README.md`, `train_assoc_recall.py`, `train_wikitext_lm.py`, `experiment_tables.md`, and current summaries, then reframed the task around a thesis-quality comparison plan rather than ad hoc single runs.
+- Rationale: The project already has enough scaffolding and some prior results; the limiting factor is now experiment design discipline, not raw implementation.
+- Key details: Existing runnable baselines already include `baseline`, `attn_residuals`, and several `depth_memory*` variants for both associative recall and language modeling. The next plan should distinguish standard baselines from the custom dual-axis family and avoid overclaiming novelty before the exact comparison set is fixed.
+- Side effects: Project memory is now aligned to the thesis experiment-design task, making it easier to extend into implementation and runs in the next step.
+- Verification: Reviewed memory files and relevant training/model files with `sed`.
+- Next step: Produce the concrete experiment matrix, naming the main-result baselines, secondary comparisons, and required ablations.
+
+### [Step 021] - 2026-03-31 13:16 CST - Implement dual-axis-memory main method
+- Request: Implement the user's main network architecture and compare it against `baseline` and `attn_residuals`.
+- Plan: Add a new attention type dedicated to the thesis main method, wire it into both training entrypoints, and keep the implementation faithful to the user's stated idea of horizontal plus vertical retrieval with `K = V = x` on the depth branch.
+- Files touched: `src/layer_depth_attention/model.py`, `train_assoc_recall.py`, `train_wikitext_lm.py`, `experiment_notes.md`, `dev_log.md`, `memory/events.jsonl`, `memory/summaries.md`
+- Modification: Added `dual_axis_memory`, where each block performs standard row-wise causal self-attention and a column-wise same-token retrieval over previous layer outputs using a separate `q_col`; the depth branch directly reuses prior hidden states with `K = V = x`. Added the new method name to the training CLIs and documented it in experiment notes.
+- Rationale: The prior codebase had several related `depth_memory*` variants but no single method that cleanly represented the user's final horizontal-plus-vertical retrieval architecture.
+- Key details: The implementation stores previous block outputs as the depth-memory bank only within the current forward pass. It does not create a new sequence-long cache beyond the usual row attention path. The row branch still uses projected `q_row/k/v`, while the column branch uses normalized prior hidden states directly.
+- Side effects: The project now has a distinct `ours` candidate that can be compared fairly against `baseline` and `attn_residuals` under the exact same training loop.
+- Verification: `python train_assoc_recall.py --device cpu --steps 2 --batch-size 2 --eval-interval 1 --eval-batches 1 --d-model 32 --num-layers 3 --num-heads 4 --num-pairs 4 --vocab-size 32 --attention-type dual_axis_memory --output artifacts/smoke_dual_axis_memory.json`
+- Next step: Run the first three-way comparison and inspect whether the new method is numerically stable and competitive enough to justify larger runs.
+
+### [Step 022] - 2026-03-31 13:22 CST - Run first three-way dual-axis comparison
+- Request: Start experiments after implementing the user's method.
+- Plan: Use one small but shared associative-recall configuration on CPU to compare `baseline`, `attn_residuals`, and `dual_axis_memory` immediately, then use the trend to choose the next larger run.
+- Files touched: `dev_log.md`, `memory/events.jsonl`, `memory/summaries.md`
+- Modification: Ran three `100`-step associative-recall jobs with identical settings (`d_model=64`, `num_layers=4`, `num_heads=4`, `num_pairs=8`, `vocab_size=64`, `seed=42`) and saved artifacts to `artifacts/assoc_recall_baseline_initial_compare.json`, `artifacts/assoc_recall_attn_residuals_initial_compare.json`, and `artifacts/assoc_recall_dual_axis_memory_initial_compare.json`.
+- Rationale: A fast three-way run was the shortest path to validate the implementation and get an initial signal before spending larger training budget.
+- Key details: The new method trained stably. Final eval losses were `baseline=2.3475`, `attn_residuals=2.2609`, `dual_axis_memory=2.3116`; final accuracies were `0.1187`, `0.1125`, and `0.1125` respectively. On this tiny CPU probe, `dual_axis_memory` finished better than `baseline` in loss but still behind `attn_residuals` in loss, and accuracy was too noisy to distinguish the methods cleanly.
+- Side effects: Confirms the code path is viable, but the current tiny setting is not strong enough to judge the thesis claim.
+- Verification: All three CPU runs completed successfully and wrote their JSON artifacts.
+- Next step: Promote the same three-method comparison to a larger server configuration and decide whether `dual_axis_memory` needs a gating or normalization refinement if it continues to lag.
+
+### [Step 023] - 2026-03-31 13:39 CST - Launch larger server comparison
+- Request: Move the comparison onto the server and increase the effective training budget.
+- Plan: Sync only the updated training/model files to `D:\Projects\Layer-Depth-Attention`, verify CUDA execution remotely with a short `dual_axis_memory` smoke run, then launch a larger sequential three-method `assoc_recall` comparison in one persistent SSH session.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Copied `src/layer_depth_attention/model.py`, `train_assoc_recall.py`, `train_wikitext_lm.py`, and `experiment_notes.md` to the default Windows server project. Verified `dual_axis_memory` runs successfully on remote CUDA with a 2-step smoke test. Started a long-running sequential job over SSH with config `steps=800`, `batch_size=64`, `d_model=256`, `num_layers=8`, `num_heads=8`, `num_pairs=20`, `vocab_size=128` for `baseline`, `attn_residuals`, and `dual_axis_memory` in that order.
+- Rationale: The local machine has no CUDA, and the small CPU probe was too weak to evaluate the thesis claim. The server run provides a much stronger first comparison without overcomplicating the benchmark.
+- Key details: The training script is step-based rather than epoch-based, so the user request to increase "epoch and batch size" was translated into a larger `batch_size` and longer `steps`. The long run is currently active in an SSH session rather than as a detached Windows background task because the direct background-launch path was less reliable.
+- Side effects: Remote results are now in progress. Expected artifacts are `D:\Projects\Layer-Depth-Attention\artifacts\assoc_recall_baseline_server_dualaxis_b64_s800.json`, `D:\Projects\Layer-Depth-Attention\artifacts\assoc_recall_attn_residuals_server_dualaxis_b64_s800.json`, and `D:\Projects\Layer-Depth-Attention\artifacts\assoc_recall_dual_axis_memory_server_dualaxis_b64_s800.json`.
+- Verification: Remote smoke run command completed successfully and wrote `D:\Projects\Layer-Depth-Attention\artifacts\remote_smoke_dual_axis_memory.json`; the larger three-run SSH session is active as local session `85315`.
+- Next step: Poll the remote session for progress and summarize the first completed baseline metrics before deciding whether to keep this setting for the full thesis comparison or raise it again.
+
+### [Step 024] - 2026-03-31 23:28 CST - Collect server-side three-way comparison results
+- Request: Check the server results after the larger run finished.
+- Plan: Read the completed remote session output, confirm that all three artifacts were written, and compare convergence speed and final metrics across `baseline`, `attn_residuals`, and `dual_axis_memory`.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Collected the finished remote output for the `800`-step, `batch_size=64`, `d_model=256`, `num_layers=8`, `num_heads=8`, `num_pairs=20`, `vocab_size=128` run. Verified the three JSON artifacts exist on the server.
+- Rationale: This is the first properly scaled comparison of the user's final method against the chosen thesis baselines.
+- Key details: All three methods reached `eval_acc=1.0000` by the end. `attn_residuals` converged earliest, already reaching `eval_acc=0.3281` and `eval_loss=2.5555` at step `400`, then `1.0000` accuracy by step `500`. `dual_axis_memory` was clearly better than `baseline` in the mid stage, reaching `eval_acc=0.8672` and `eval_loss=0.8537` at step `500`, while `baseline` was still at `eval_acc=0.0578` and `eval_loss=3.2945` there. `baseline` only caught up at step `600`. By step `600`, both `attn_residuals` and `dual_axis_memory` had already solved the task.
+- Side effects: The current story is now sharper: the proposed dual-axis method improves sample efficiency over the standard Transformer baseline on this harder associative-recall setting, but it still trails `attn_residuals` on convergence speed.
+- Verification: Read the remote session output and confirmed existence timestamps for the three remote JSON artifacts.
+- Next step: Turn this into an explicit step-wise comparison table for the thesis and then repeat the same three-way comparison on WikiText.
+
+### [Step 025] - 2026-03-31 23:32 CST - Launch WikiText-2 three-way comparison
+- Request: Run the same three methods on WikiText to see whether the text-task ranking matches the associative-recall result.
+- Plan: Reuse the existing `train_wikitext_lm.py` entrypoint and remote `wikitext-2-raw-v1` + `gpt2_tokenizer` assets, then execute `baseline`, `attn_residuals`, and `dual_axis_memory` sequentially under one shared LM configuration.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Started a remote sequential command using `python .\train_wikitext_lm.py` on the Windows server with `steps=1000`, `batch_size=8`, `grad_accum_steps=4`, `seq_len=128`, `eval_interval=200`, `eval_batches=20`, `d_model=256`, `num_layers=6`, `num_heads=8`, `seed=42` for `baseline`, `attn_residuals`, and `dual_axis_memory`.
+- Rationale: Associative recall alone is not enough for the thesis claim; the user explicitly asked to check whether the same ranking appears on standard language modeling.
+- Key details: Remote assets `external_data/wikitext-2-raw-v1` and `external_data/gpt2_tokenizer` were verified before launch. The Windows-side process is running, but this command path appears to buffer stdout until each method exits, so intermediate progress is being tracked through the active `python` process and eventual artifact creation rather than live metric lines.
+- Side effects: The next decisive artifacts will be `D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_baseline_dualaxis_compare_s1000.json`, `D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_attn_residuals_dualaxis_compare_s1000.json`, and `D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_dual_axis_memory_dualaxis_compare_s1000.json`.
+- Verification: Confirmed remote dataset/tokenizer existence and an active remote `python` process after launch.
+- Next step: Poll until the first baseline JSON appears, then summarize interim text-task results before the full three-run sequence finishes.
+
+### [Step 026] - 2026-03-31 23:38 CST - Collect WikiText-2 three-way comparison results
+- Request: Check the finished WikiText training results.
+- Plan: Read the three remote JSON artifacts, compare final validation and test metrics, and determine whether the text-task ranking matches associative recall.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Loaded `wikitext2_baseline_dualaxis_compare_s1000.json`, `wikitext2_attn_residuals_dualaxis_compare_s1000.json`, and `wikitext2_dual_axis_memory_dualaxis_compare_s1000.json` from the server after all three completed.
+- Rationale: The thesis needs to know whether the proposed method's advantage is benchmark-specific or transfers to standard language modeling.
+- Key details: Final ranking on WikiText-2 is `attn_residuals > baseline > dual_axis_memory`. Metrics:
+  `baseline`: `val_loss=5.5447`, `val_ppl=255.88`, `test_loss=4.7640`, `test_ppl=117.21`
+  `attn_residuals`: `val_loss=5.4518`, `val_ppl=233.18`, `test_loss=4.6763`, `test_ppl=107.38`
+  `dual_axis_memory`: `val_loss=5.6021`, `val_ppl=271.00`, `test_loss=4.8709`, `test_ppl=130.43`
+  Intermediate checkpoints also show `dual_axis_memory` did not overtake baseline at `200/400/600/800` steps.
+- Side effects: This breaks the simpler associative-recall narrative. The current dual-axis implementation appears to help structured retrieval more than standard text LM, and the paper claim must reflect that unless the method is improved.
+- Verification: Read all three remote JSON files successfully and confirmed their timestamps in the server artifact directory.
+- Next step: Decide whether to tune `dual_axis_memory` for text LM (for example with gating or better normalization) or reposition the method as stronger on retrieval-style tasks than on generic language modeling.
+
+### [Step 027] - 2026-04-01 00:01 CST - Run placement ablations on WikiText-2
+- Request: Run two additional experiments: one that changes only causal attention and one that changes only residual attention.
+- Plan: Reuse the same `WikiText-2` configuration as the previous three-way run, treat `dual_axis_memory` as the causal-only variant, implement a new `attn_residuals_dual_axis` as the residual-only variant, then compare both placements against the existing baseline and `attn_residuals` references.
+- Files touched: `src/layer_depth_attention/model.py`, `train_assoc_recall.py`, `train_wikitext_lm.py`, `dev_log.md`, `memory/events.jsonl`
+- Modification: Added `attn_residuals_dual_axis`, which keeps the block-level causal self-attention unchanged but extends the residual-attention mixing path with a row-wise causal token retrieval branch in addition to the original depth-wise residual retrieval. Verified the new method with a local smoke test, synced code to the server, and ran two remote `WikiText-2` jobs:
+  `dual_axis_memory` -> `wikitext2_dual_axis_memory_causal_only_s1000.json`
+  `attn_residuals_dual_axis` -> `wikitext2_attn_residuals_dual_axis_residual_only_s1000.json`
+- Rationale: The previous dual-axis result did not clarify whether the weakness on text LM came from modifying the causal attention path, the residual path, or the dual-axis mechanism itself.
+- Key details: Final metrics:
+  causal-only `dual_axis_memory`: `val_loss=5.6021`, `test_loss=4.8709`, `test_ppl=130.43`
+  residual-only `attn_residuals_dual_axis`: `val_loss=5.7026`, `test_loss=4.9132`, `test_ppl=136.07`
+  Compared with earlier references on the exact same setting:
+  `baseline`: `val_loss=5.5447`, `test_loss=4.7640`, `test_ppl=117.21`
+  `attn_residuals`: `val_loss=5.4518`, `test_loss=4.6763`, `test_ppl=107.38`
+  So the causal-only placement is better than the residual-only placement, but both are worse than `baseline`, and both are clearly worse than the original `attn_residuals`.
+- Side effects: The current evidence suggests the dual-axis idea is not yet helping text LM regardless of whether it is placed in the causal attention path or the residual-attention path.
+- Verification: Local smoke tests passed for `attn_residuals_dual_axis`; both remote `WikiText-2` runs completed successfully and wrote their JSON artifacts.
+- Next step: Try a gated or damped dual-axis variant if the goal is to recover text-LM performance without abandoning the retrieval-style inductive bias.
+
+### [Step 028] - 2026-04-01 00:10 CST - Probe seq_len=512 memory fit
+- Request: Increase sequence length by 4x and rerun the WikiText experiments while recording every run.
+- Plan: Before launching long seq_len=512 jobs, run a short remote baseline probe to find a safe `batch_size/grad_accum_steps` on the 16GB 4060 Ti.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Ran a 2-step remote `WikiText-2` baseline probe at `seq_len=512`, `batch_size=4`, `grad_accum_steps=2`, `d_model=256`, `num_layers=6`, `num_heads=8`. The run completed and wrote `D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_seq512_probe_baseline.json`.
+- Rationale: Jumping directly from `seq_len=128` to `512` could have caused an avoidable OOM on the server.
+- Key details: The probe succeeded without memory failure, so `batch_size=4, grad_accum_steps=2` is a viable starting point for the longer seq_len=512 comparisons. One naming ambiguity remains: the user referred to "5 experiments", but the currently distinct methods on this text line are `baseline`, `attn_residuals`, `dual_axis_memory`, and `attn_residuals_dual_axis`; `dual_axis_memory` already is the causal-only variant.
+- Side effects: We now have a concrete safe configuration for the longer-context runs and can record each launched experiment cleanly.
+- Verification: Remote probe completed successfully and saved the seq512 artifact.
+- Next step: Launch the seq_len=512 runs for the current distinct method set and record each launched command and resulting artifact.
+
+### [Step 029] - 2026-04-01 00:16 CST - Launch seq_len=512 WikiText runs
+- Request: After confirming the seq_len=512 configuration fits, start the longer-context comparison runs and keep a record of each experiment.
+- Plan: Launch one remote sequential job that runs the current distinct method set under the shared seq_len=512 configuration, then poll artifacts as each method finishes.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Started a remote sequential `WikiText-2` job covering:
+  `baseline -> D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_baseline_seq512_s1000.json`
+  `attn_residuals -> D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_attn_residuals_seq512_s1000.json`
+  `dual_axis_memory -> D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_dual_axis_memory_seq512_s1000.json`
+  `attn_residuals_dual_axis -> D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_attn_residuals_dual_axis_seq512_s1000.json`
+  Shared config: `steps=1000`, `batch_size=4`, `grad_accum_steps=2`, `seq_len=512`, `eval_interval=200`, `eval_batches=20`, `d_model=256`, `num_layers=6`, `num_heads=8`, `seed=42`.
+- Rationale: This preserves a fair longer-context comparison while staying within the confirmed memory budget of the remote GPU.
+- Key details: The user's wording mentioned "5 experiments", but based on the currently distinct methods in this branch, there are 4 non-duplicate methods to rerun. The remote `python` process is active, indicating that the first baseline run has started.
+- Side effects: Long-running seq512 results are now in progress; the results will not be directly comparable to the earlier seq128 runs on throughput because batch configuration changed to fit memory.
+- Verification: Remote SSH session launched successfully and a remote `python` process was observed afterward.
+- Next step: Poll until `wikitext2_baseline_seq512_s1000.json` appears, then log its metrics and continue tracking the remaining three methods.
+
+### [Step 030] - 2026-04-01 00:22 CST - Add full dual-axis as the fifth seq512 experiment
+- Request: Clarify the missing fifth experiment and include the user's main version that changes both causal attention and residual attention.
+- Plan: Implement a new `dual_axis_full` method that combines `dual_axis_memory` at the block-attention level with dual-axis residual mixing, verify it locally, sync it to the server, and queue a fifth remote seq512 run to start after the current four-run sequence.
+- Files touched: `src/layer_depth_attention/model.py`, `train_assoc_recall.py`, `train_wikitext_lm.py`, `dev_log.md`, `memory/events.jsonl`
+- Modification: Added `dual_axis_full` as a new `attention_type`. In this mode, the block path uses `dual_axis_memory`, while the residual-attention path uses the dual-axis residual mixer already introduced for `attn_residuals_dual_axis`. Verified it with a local 2-step `assoc_recall` smoke test, synced the updated code to the server, and uploaded/launched `D:\Projects\Layer-Depth-Attention\run_dual_axis_full_after_seq512.ps1` so `wikitext2_dual_axis_full_seq512_s1000.json` will run after the ongoing four-run seq512 queue finishes.
+- Rationale: The user clarified that the full version is the real main method, so the longer-context comparison would be incomplete without it.
+- Key details: The seq512 comparison set is now truly five experiments:
+  `baseline`, `attn_residuals`, `dual_axis_memory`, `attn_residuals_dual_axis`, `dual_axis_full`.
+  The fifth run is queued behind the current remote Python workload rather than injected in parallel, so it should not contend for the 4060 Ti.
+- Side effects: Final seq512 completion time is now longer, but the experiment inventory matches the intended paper comparison set.
+- Verification: Local `dual_axis_full` smoke test completed successfully and the remote queue script was uploaded and started.
+- Next step: Continue polling the seq512 artifacts in order and include `dual_axis_full` in the final longer-context summary once its JSON is written.
+
+### [Step 031] - 2026-04-01 00:30 CST - Read first four seq512 results and relaunch missing fifth run
+- Request: Check the completed seq512 results after the longer-context experiments finished.
+- Plan: Read all available `seq512` JSON artifacts, summarize the first four methods, then verify whether the fifth `dual_axis_full` artifact exists; if not, start it explicitly.
+- Files touched: `dev_log.md`, `memory/events.jsonl`
+- Modification: Read the finished `wikitext2_baseline_seq512_s1000.json`, `wikitext2_attn_residuals_seq512_s1000.json`, `wikitext2_dual_axis_memory_seq512_s1000.json`, and `wikitext2_attn_residuals_dual_axis_seq512_s1000.json` artifacts. Confirmed that `wikitext2_dual_axis_full_seq512_s1000.json` did not exist yet and that no remote `python` process was active, so launched `dual_axis_full` manually as its own remote run.
+- Rationale: The queued fifth run did not trigger automatically, and the longer-context comparison would remain incomplete without the user's main version.
+- Key details: First four `seq512` results currently rank:
+  `baseline`: `val_loss=5.2334`, `test_loss=5.4979`, `test_ppl=244.18`
+  `attn_residuals`: `val_loss=5.2237`, `test_loss=5.5035`, `test_ppl=245.56`
+  `dual_axis_memory`: `val_loss=5.2904`, `test_loss=5.5569`, `test_ppl=259.02`
+  `attn_residuals_dual_axis`: `val_loss=5.3992`, `test_loss=5.6463`, `test_ppl=283.23`
+  So under `seq_len=512`, `baseline` and `attn_residuals` are now almost tied on test, and both dual-axis variants remain worse.
+- Side effects: The fifth run is now active separately, so the final five-way `seq512` summary will need one more polling pass.
+- Verification: Successfully read four remote JSON files; standalone `dual_axis_full` remote session is active as local session `49999`.
+- Next step: Wait for `wikitext2_dual_axis_full_seq512_s1000.json` to finish, then produce the full five-method longer-context comparison.
+
+### [Step 032] - 2026-04-01 00:35 CST - 统一实验日志语言为中文
+- Request: 写实验日志要用中文。
+- Plan: 在当前任务约束中明确记录“后续实验日志统一使用中文”，并从下一条开始切换日志语言。
+- Files touched: `dev_log.md`
+- Modification: 在 Current Task Lens 的约束中新增“实验日志统一用中文”的规则，并新增本条记录作为切换点。
+- Rationale: 便于后续论文整理与实验追踪，避免中英混杂影响阅读。
+- Key details: 这条规则作用于后续实验日志；已有历史记录暂不翻译回写，避免引入额外噪声。
+- Side effects: 从下一次实验记录开始，所有新增日志条目将统一使用中文。
+- Verification: 已更新本地 `dev_log.md`。
+- Next step: 继续跟踪 `dual_axis_full` 的 `seq512` 结果，并用中文记录后续实验结论。
 
 ### [Step 020] - 2026-03-30 20:10 CST - Add no-attention-residual ablation switch
 - Request: Test the variant that keeps FFN residual but removes the attention residual.
@@ -1245,3 +1419,51 @@
 - 影响：旧方法和旧结果都不变；`depth_memory_directkv_qmix` 作为一个新的可比较分支存在。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_directkv_qmix')` 前向与反向 smoke test 通过，输出形状 `(2, 16, 128)`，参数量 `225920`。
 - 下一步：同步到 `develop`，并直接在完整 `WikiText-103` 大设定上跑一轮 `500 step` 测试。
+
+### [步骤 107] - 2026-03-31 14:12 CST - 完成 depth_memory_directkv_qmix 在完整 WikiText-103 大设定上的测试
+- 请求：用户要求试一下“q 由行内 q 和列内 q 经过注意力混合得到”的方案。
+- 计划：将 `depth_memory_directkv_qmix` 推送到 `develop` 后，在完整 `wikitext-103-raw-v1` 和更大模型配置上直接跑 `500 step`。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了 `depth_memory_directkv_qmix` 的大设定结果。
+- 原因：需要验证 `q_mix` 是否能修复 `directkv_dualq` 在完整 `WikiText-103` 上表现偏弱的问题。
+- 关键信息：配置为 `wikitext-103-raw-v1`、`d_model=512`、`num_layers=20`、`seq_len=256`、`batch_size=2`、`grad_accum_steps=4`、`steps=500`、`eval_interval=100`、`eval_batches=10`。最终 `val_loss=16.0246`、`test_loss=14.6302`、`test_ppl=2258400.96`。
+- 影响：`q_mix` 版本没有改善 `directkv` 这条线在更大规模上的表现，反而比 `depth_memory_directkv_dualq (2116994.37)` 还差，也继续落后于 `baseline (1759555.61)` 和 `value_reproj_normed (1643285.39)`。说明单纯把 memory 查询改成 `q_row/q_col` 的注意力混合，还不足以补足“直接复用历史 kv”在大设定上的劣势。
+- 验证：服务器生成了 `artifacts/wikitext103_full_directkv_qmix_20l_512d_500.json`，训练日志和最终指标完整。
+- 下一步：如果继续沿这条线探索，就不该再只改 q，而应考虑更实质的 memory 对齐或轻量适配机制；否则建议回到 `value_reproj_normed` 主线。
+
+### [步骤 108] - 2026-03-31 14:19 CST - 完成 Attention Residuals 在完整 WikiText-103 大设定上的测试
+- 请求：用户要求在更大数据集和更大模型设定下，直接跑 `Attention Residuals` 看效果。
+- 计划：沿用与 `baseline / value_reproj_normed / directkv` 完全一致的大设定，在完整 `wikitext-103-raw-v1` 上运行 `500 step`，得到一条可直接并排比较的结果。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了 `attn_residuals` 在完整 `WikiText-103` 大设定下的结果。
+- 原因：此前 `Attention Residuals` 只在 `probe` 主配置上表现很强，需要确认它在更大规模设定下是否仍然领先。
+- 关键信息：配置为 `wikitext-103-raw-v1`、`d_model=512`、`num_layers=20`、`seq_len=256`、`batch_size=2`、`grad_accum_steps=4`、`steps=500`、`eval_interval=100`、`eval_batches=10`。最终 `val_loss=15.7318`、`test_loss=15.0075`、`test_ppl=3293707.52`。
+- 影响：在这组完整 `WikiText-103` 大设定下，`Attention Residuals` 反而明显差于 `baseline (1759555.61)`、`value_reproj_normed (1643285.39)`、甚至也差于 `directkv` 两条线。这说明它在 `probe` 上的强表现没有直接迁移到当前这组更大规模训练配方中。
+- 验证：服务器生成了 `artifacts/wikitext103_full_attn_residuals_20l_512d_500.json`，训练日志和最终指标完整。
+- 下一步：如果还想比较 `Attention Residuals`，更合理的是改训练预算或优化配方；按当前这组大设定，它不是最强方法。
+
+### [步骤 109] - 2026-03-31 14:27 CST - 保存两张核心实验对照表
+- 请求：用户要求把刚整理出来的两张核心对照表保存起来，后面便于直接引用。
+- 计划：将文本主配置 `2000 step` 总表，以及完整 `WikiText-103` 大设定 `500 step` 含训练损失总表，单独写入一个新文档。
+- 涉及文件：`experiment_tables.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增 `experiment_tables.md`，集中保存两张核心实验对照表和简短结论。
+- 原因：避免后续在长日志里反复翻找，尤其论文写作时需要直接引用表格。
+- 关键信息：新文档包含：
+  1. `wikitext-103-probe / 16层 / 2000 step` 的最终指标对照表；
+  2. `wikitext-103-raw-v1 / 20层 / 500 step` 的训练损失与最终指标对照表。
+- 影响：后续你可以直接从单一文件里查看和复制当前最重要的对照结果，不需要再翻 `dev_log.md` 或远端产物 JSON。
+- 验证：已创建 [experiment_tables.md](/Users/a/Projects/Layer-Depth-Attention/experiment_tables.md) 并写入两张表。
+- 下一步：如果需要，我可以继续把这份表再整理成论文用的 LaTeX `tabular` 版本。
+
+### [步骤 110] - 2026-03-31 14:39 CST - 完成“大数据集 + 小模型 + 2000 step”的 baseline / directkv 对比
+- 请求：用户明确要求把 `depth_memory_directkv_dualq` 作为当前实验方法，在更大的数据集和较小模型上，与基础模型做 `2000 step` 对比。
+- 计划：使用完整 `wikitext-103-raw-v1`，把模型规模降到 `d_model=384, num_layers=16`，顺序运行 `baseline` 和 `depth_memory_directkv_dualq`，避免单卡并行干扰。
+- 涉及文件：`experiment_tables.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：记录了这组“大数据集 + 小模型 + 2000 step”的完整对比结果，并把表加入 `experiment_tables.md`。
+- 原因：此前在完整 `WikiText-103` 上只跑过 `500 step` 的大模型版本，用户想知道更长训练预算下这条方法是否会追上。
+- 关键信息：配置为 `wikitext-103-raw-v1`、`d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=4`、`grad_accum_steps=4`、`steps=2000`。  
+  `baseline` 最终 `val_loss=6.5931`、`test_loss=6.4540`、`test_ppl=635.25`。  
+  `depth_memory_directkv_dualq` 最终 `val_loss=6.5711`、`test_loss=6.4109`、`test_ppl=608.42`。
+- 影响：这条“直接复用历史 kv + 双 q”方法在完整 `WikiText-103` 上并不是完全不行；在更长训练预算和较小模型下，它重新取得了相对 baseline 的正收益。这说明它比之前 `500 step` 的大设定更依赖训练预算。
+- 验证：服务器生成了 `artifacts/wikitext103_full_baseline_16l_384d_2000.json` 与 `artifacts/wikitext103_full_directkv_dualq_16l_384d_2000.json`，训练均已结束。
+- 下一步：如果继续，应考虑把这条线和 `value_reproj_normed` 在同一“小模型 + 2000 step”完整 `WikiText-103` 设定下正面对齐。

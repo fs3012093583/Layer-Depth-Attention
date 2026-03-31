@@ -47,6 +47,11 @@
 - `attn_residuals`
   Attention Residuals baseline implemented in-repo for comparison.
 
+- `dual_axis_memory`
+  Ours. Row-wise retrieval uses standard causal self-attention within the current layer.
+  Column-wise retrieval uses a separate `q_col` to attend over the same token position from previous layer outputs, with `K = V = x` on the depth-memory branch.
+  The final attention output is the sum of row-context and column-context before the output projection.
+
 - `attn_residuals_value_reproj_normed`
   Attention Residuals combined with normalized value reprojection.
 
@@ -99,11 +104,15 @@
 | `baseline` | 15.5705 | 14.3806 | 1759555.61 |
 | `depth_memory_value_reproj_normed` | 15.6581 | 14.3122 | 1643285.39 |
 | `depth_memory_directkv_dualq` | 15.8767 | 14.5655 | 2116994.37 |
+| `depth_memory_directkv_qmix` | 16.0246 | 14.6302 | 2258400.96 |
+| `attn_residuals` | 15.7318 | 15.0075 | 3293707.52 |
 
 - Reading:
   - 在完整 `WikiText-103` 和更大模型下，`value_reproj_normed` 的 `test_loss/test_ppl` 继续优于 `baseline`。
   - 但验证集略差，说明当前 `500` 步预算下这组优势还不够稳，需要更长训练或更多随机种子确认。
   - `depth_memory_directkv_dualq` 在这组更大规模设定下没有维持住 probe 上的相对优势，当前明显弱于旧版 `value_reproj_normed`。
+  - `depth_memory_directkv_qmix` 进一步证明：只在 q 机制上做混合，还不足以救回 direct-kv 路线在大设定上的劣势。
+  - `attn_residuals` 在这组大设定和当前训练配方下并不占优，说明它在 probe 上的强表现没有直接迁移过来。
 
 ## CIFAR100 Probe
 

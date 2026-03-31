@@ -33,7 +33,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-size", type=int, default=64)
     parser.add_argument(
         "--attention-type",
-        choices=["baseline", "depth_memory", "depth_memory_value_reproj", "attn_residuals", "attn_residuals_value_reproj"],
+        choices=[
+            "baseline",
+            "dual_axis_memory",
+            "dual_axis_full",
+            "depth_memory",
+            "depth_memory_value_reproj",
+            "attn_residuals",
+            "attn_residuals_dual_axis",
+            "attn_residuals_value_reproj",
+        ],
         default="baseline",
     )
     parser.add_argument("--attn-residual", choices=["on", "off"], default="on")
