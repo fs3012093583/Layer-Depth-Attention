@@ -26,6 +26,10 @@
   当前层正常生成 `q_row/k/v`，同列历史部分直接复用前面层已经算好的 `k/v`。
   只额外学习一个 `q_col` 用于同列历史检索，不对历史 `V/K` 做任何新的映射。
 
+- `depth_memory_directkv_qmix`
+  基于 `depth_memory_directkv_dualq`，但同列历史使用的查询不再直接等于 `q_col`。
+  先得到 `q_row` 和 `q_col`，再用一个两路注意力将它们混成 `q_mix`，并用 `q_mix` 查询直接复用的历史 `k/v`。
+
 - `depth_memory_qkv_reproj`
   Same-position historical `Q/K/V` are treated as separate memory slots, normalized, and then passed through the current layer `K/V` projection path.
 
@@ -63,6 +67,7 @@
 | `depth_memory` | 3.9228 | 50.54 | 4.2325 | 68.89 |
 | `depth_memory_value_reproj` | 3.9107 | 49.93 | 4.1997 | 66.67 |
 | `depth_memory_value_reproj_normed` | 3.9219 | 50.49 | 4.1936 | 66.26 |
+| `depth_memory_directkv_dualq` | 3.9869 | 53.89 | 4.2063 | 67.11 |
 | `depth_memory_qkv_reproj` | 3.9154 | 50.17 | 4.1991 | 66.63 |
 | `depth_memory_value_reproj_dualq_sharedcol` | 3.8850 | 48.67 | 4.1970 | 66.49 |
 | `depth_memory_value_reproj_dualq` | 3.9862 | 53.85 | 4.2056 | 67.06 |
@@ -77,6 +82,7 @@
 - Normalizing historical `V` before reprojection gives a small but repeatable gain over plain `value_reproj`.
 - Adding historical `Q/K` into reprojection does not clearly beat the simpler value-only route.
 - 双查询方向本身有信号，但在当前主配置下，“全层共享同列查询”优于“每层独立同列查询”。
+- “直接复用历史 kv + 只额外学习 q_col”的极简双 q 版是有效的，但当前仍弱于更强的重投影对齐版本。
 - 当前最强的非 `Attention Residuals` 版本仍然是 `depth_memory_value_reproj_normed`。
 - 直接用退化版 q-attention 替代 FFN，在当前文本主配置下没有带来收益；即使长训到 `2000 step`，最终仍略差于 `baseline`。
 - 把“双 q”同时推到 attention 与 FFN 两处会进一步变差；这条更重的双层双 q 版本目前是已验证但不值得继续堆预算的分支。
@@ -92,10 +98,12 @@
 |---|---:|---:|---:|
 | `baseline` | 15.5705 | 14.3806 | 1759555.61 |
 | `depth_memory_value_reproj_normed` | 15.6581 | 14.3122 | 1643285.39 |
+| `depth_memory_directkv_dualq` | 15.8767 | 14.5655 | 2116994.37 |
 
 - Reading:
   - 在完整 `WikiText-103` 和更大模型下，`value_reproj_normed` 的 `test_loss/test_ppl` 继续优于 `baseline`。
   - 但验证集略差，说明当前 `500` 步预算下这组优势还不够稳，需要更长训练或更多随机种子确认。
+  - `depth_memory_directkv_dualq` 在这组更大规模设定下没有维持住 probe 上的相对优势，当前明显弱于旧版 `value_reproj_normed`。
 
 ## CIFAR100 Probe
 

@@ -210,6 +210,66 @@ class LayerDepthDirectKVDualQAttention(MultiHeadAttentionBase):
         return self.out_proj(self._merge_heads(attn)), (k, v, q_row)
 
 
+class LayerDepthDirectKVQMixAttention(MultiHeadAttentionBase):
+    # 当前层仍保留 q_row/k/v。
+    # 同列历史部分先得到 q_row 和 q_col，再用一个两路注意力把它们混成 q_mix。
+    # 历史 k/v 直接复用，不做任何重投影。
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        dropout: float,
+    ) -> None:
+        super().__init__(d_model, num_heads, dropout)
+        self.column_q_proj = nn.Linear(d_model, d_model)
+
+    def _mix_queries(self, q_row: torch.Tensor, q_col: torch.Tensor) -> torch.Tensor:
+        # 用两路注意力决定 q_row / q_col 在 memory 查询里的占比。
+        query_bank = torch.stack([q_row, q_col], dim=-2)
+        mix_scores = torch.matmul(q_row.unsqueeze(-2), query_bank.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        mix_weights = torch.softmax(mix_scores, dim=-1)
+        mixed_query = torch.matmul(mix_weights, query_bank).squeeze(-2)
+        return mixed_query
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[List[KVCache]] = None,
+    ) -> Tuple[torch.Tensor, KVCache]:
+        q_row, k, v = self._split_qkv(x)
+        q_col = self._split_projected(self.column_q_proj(x))
+        q_mix = self._mix_queries(q_row, q_col)
+        seq_len = x.size(1)
+
+        # 当前层 token attention 仍使用标准的 q_row。
+        token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
+
+        if past_kv:
+            # 同列历史直接复用旧层 k/v，memory 查询改用注意力混合后的 q_mix。
+            past_keys = torch.stack([item[0] for item in past_kv], dim=3)
+            past_values = torch.stack([item[1] for item in past_kv], dim=3)
+            memory_scores = (q_mix.unsqueeze(3) * past_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = torch.softmax(scores, dim=-1)
+            weights = self.dropout(weights)
+            token_weights = weights[..., :seq_len]
+            memory_weights = weights[..., seq_len:]
+            token_context = torch.matmul(token_weights, v)
+            memory_context = (memory_weights.unsqueeze(-1) * past_values).sum(dim=3)
+            attn = token_context + memory_context
+        else:
+            weights = torch.softmax(token_scores, dim=-1)
+            weights = self.dropout(weights)
+            attn = torch.matmul(weights, v)
+
+        return self.out_proj(self._merge_heads(attn)), (k, v, q_row)
+
+
 class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
     #双q，一个用于计算token_scores，一个用于计算memory_scores
     def __init__(
@@ -598,6 +658,8 @@ class TransformerBlock(nn.Module):
             self.attn = LayerDepthValueReprojNormedDualQAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_directkv_dualq":
             self.attn = LayerDepthDirectKVDualQAttention(d_model, num_heads, dropout)
+        elif attention_type == "depth_memory_directkv_qmix":
+            self.attn = LayerDepthDirectKVQMixAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj_dualq":
             self.attn = LayerDepthValueReprojDualQAttention(
                 d_model,

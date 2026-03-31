@@ -1212,3 +1212,36 @@
 - 影响：新旧语义终于彻底分开，后续实验结果不会再污染之前的 `value_reproj_normed` 结论。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed')` 与 `TinyDecoderLM(attention_type='depth_memory_directkv_dualq')` 的前向/反向 smoke test 均通过，输出形状均为 `(2, 16, 128)`，参数量均为 `225920`。
 - 下一步：把新方法 `depth_memory_directkv_dualq` 同步到服务器，在文本主配置上直接跑 `2000 step`。
+
+### [步骤 104] - 2026-03-31 13:52 CST - 完成 depth_memory_directkv_dualq 的 2000 步文本长训
+- 请求：用户要求在新名字下直接开跑，把“当前层 `q_row/k/v` + 同列历史直接复用 `k/v` + 只学习 `q_col`”这版真正测出来。
+- 计划：将 `develop` 分支推送到远端后，让服务器切到 `origin/develop`，在标准文本主配置上直接运行 `2000 step`。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了新方法 `depth_memory_directkv_dualq` 的完整 `2000 step` 结果。
+- 原因：此前这条极简双 q 版虽然已实现并本地验证，但还没有正式实验结果。
+- 关键信息：配置为 `wikitext-103-probe`、`d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=8`、`steps=2000`、`eval_interval=300`。验证集依次为 `step 300 val_loss=8.6515`、`600=5.5327`、`900=4.6575`、`1200=4.2937`、`1500=4.1122`、`1800=4.0185`、`2000=3.9869`。最终 `test_loss=4.2063`、`test_ppl=67.11`。
+- 影响：这条“直接复用历史 kv、只额外学习 q_col”的极简双 q 版本是有效的，优于 `baseline (69.14)`，但仍然弱于旧版 `value_reproj_normed (66.26)` 与旧的 `sharedcol dualq (66.49)`。说明单靠“历史 kv 直连 + 双 q”可以带来正收益，但还没有超过之前更强的 memory 对齐版本。
+- 验证：服务器生成了 `artifacts/wikitext103probe_directkv_dualq_2000.json`，训练日志和最终指标完整。
+- 下一步：如果继续沿这条新方法线推进，应考虑补第二个 seed，或者在完整 `WikiText-103` 大设定上再跑一轮，确认这版的稳定性和规模行为。
+
+### [步骤 105] - 2026-03-31 13:58 CST - 完成 depth_memory_directkv_dualq 在完整 WikiText-103 大设定上的测试
+- 请求：用户指出上一轮还是在 `probe` 数据上，要求把新方法真正放到更大的数据集上测试。
+- 计划：在服务器已切到 `develop` 最新提交的前提下，跳过不稳定的 `git fetch origin`，直接用完整 `wikitext-103-raw-v1` 和更大模型配置运行 `depth_memory_directkv_dualq`。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`, `memory/events.jsonl`
+- 修改内容：记录了 `depth_memory_directkv_dualq` 在完整 `WikiText-103` 大设定下的 `500 step` 结果。
+- 原因：新方法必须和此前完整 `WikiText-103` 上的 `baseline` / `value_reproj_normed` 对齐比较，才能判断它在更大规模上的真实表现。
+- 关键信息：配置为 `wikitext-103-raw-v1`、`d_model=512`、`num_layers=20`、`seq_len=256`、`batch_size=2`、`grad_accum_steps=4`、`steps=500`、`eval_interval=100`、`eval_batches=10`。最终 `val_loss=15.8767`、`test_loss=14.5655`、`test_ppl=2116994.37`。
+- 影响：在完整 `WikiText-103` 和更大模型下，`depth_memory_directkv_dualq` 没有延续 `probe` 上相对 baseline 的正收益，当前结果差于 `baseline (1759555.61)`，也明显差于旧版 `value_reproj_normed (1643285.39)`。说明这条“直接复用历史 kv”的极简版本在更大规模上暂时不如重投影对齐路线。
+- 验证：服务器生成了 `artifacts/wikitext103_full_directkv_dualq_20l_512d_500.json`，训练日志和最终指标完整。
+- 下一步：如果继续探索大设定，更合理的是回到 `value_reproj_normed` 主线，或只把 `directkv_dualq` 当成一个轻量对照分支。
+
+### [步骤 106] - 2026-03-31 14:07 CST - 新增 q_mix 版 directkv 双 q 变体
+- 请求：用户提出新的 q 机制：q 不再直接由单一路径线性变换后使用，而是由“同行 q”和“同列 q”通过注意力混合得到，再试一下这个方案。
+- 计划：在 `directkv_dualq` 基础上新增一个独立分支，不覆盖已有结果。当前层 token attention 仍用 `q_row`，同列历史 memory 查询改为 `q_mix`，其中 `q_mix` 由 `q_row` 和 `q_col` 经过两路注意力混合得到。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `experiment_notes.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增 `depth_memory_directkv_qmix` 训练入口和对应 attention 类；补充方法说明。
+- 原因：需要单独验证“用注意力混合 q_row / q_col 得到 memory 查询”是否能改善直接复用历史 `kv` 这条线在大设定上的表现。
+- 关键信息：当前实现里，`q_mix` 的生成方式是：将 `q_row` 作为查询，对 `[q_row, q_col]` 这两路候选做一个两路 softmax attention，得到最终用于同列 memory 的 `q_mix`。历史 `k/v` 仍然直接复用，不做重投影。
+- 影响：旧方法和旧结果都不变；`depth_memory_directkv_qmix` 作为一个新的可比较分支存在。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 `TinyDecoderLM(attention_type='depth_memory_directkv_qmix')` 前向与反向 smoke test 通过，输出形状 `(2, 16, 128)`，参数量 `225920`。
+- 下一步：同步到 `develop`，并直接在完整 `WikiText-103` 大设定上跑一轮 `500 step` 测试。
