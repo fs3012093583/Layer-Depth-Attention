@@ -1083,3 +1083,36 @@
 - 影响：这条分支的 memory 空间会从按层 `i-1` 个同列槽位，扩展到按层前缀累计的 `k(i-1)` 个槽位，计算量显著增加。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`；本地前向/反向 smoke test 通过，`TinyDecoderLM(attention_type='depth_memory_2d_prefix')` 能输出 `(2, 16, 128)`。
 - 下一步：如果继续，就把这条分支同步到服务器，在文本基准上先跑一轮短程 probe。
+
+### [步骤 093] - 2026-03-31 11:12 CST - 完成二维前缀文本注意力的首轮 probe
+- 请求：验证“Q 查左下角所有 K”的二维前缀文本注意力是否能在标准文本基准上正常学习。
+- 计划：保持主线大配置不变，只做 `300` 步短程探测，先看 loss 曲线和最终 test ppl 是否在合理区间。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录了 `depth_memory_2d_prefix` 在 `wikitext-103-probe` 上的首轮结果。
+- 原因：这条机制比之前所有分支都更暴力，注意力空间增长更快，必须先看优化是否直接崩掉。
+- 关键信息：配置为 `d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=8`、`steps=300`。验证集从 `step 50 val_loss=17.5785` 下降到 `step 300 val_loss=11.3235`，最终 `test_loss=12.6325`、`test_ppl=306364.70`。
+- 影响：该分支虽然能正常前向和反向，但在当前主配置上的优化表现明显差于现有主线方法，说明简单地把 attention 空间暴力扩成二维左下角区域会显著加大训练难度。
+- 验证：服务器生成了 `artifacts/wikitext103probe_depth_memory_2d_prefix_probe.json`，训练进程已结束。
+- 下一步：如果继续沿这条线做，应优先考虑分块归一化、层数截断或只保留最近几层前缀，而不是直接拉长训练步数。
+
+### [步骤 094] - 2026-03-31 11:22 CST - 完成二维前缀文本注意力的 2000 步长训
+- 请求：不要只看 probe，直接把 `depth_memory_2d_prefix` 拉到和主线一致的长训练预算。
+- 计划：保持主线大配置不变，在 `wikitext-103-probe` 上运行 `2000` 步，检查它是否只是收敛慢而不是方法本身无效。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录了 `depth_memory_2d_prefix` 在 `2000` 步下的完整结果。
+- 原因：`300` 步 probe 对这条更重的二维分支明显偏短，需要看它在足够训练预算下是否能追上。
+- 关键信息：验证集依次为 `step 300 val_loss=8.6007`、`600=5.6385`、`900=4.6548`、`1200=4.2588`、`1500=4.0670`、`1800=3.9753`、`2000=3.9371`。最终 `test_loss=4.2541`、`test_ppl=70.39`。
+- 影响：长训后这条二维左下角版本已经能稳定收敛到接近 baseline 的区间，但最终仍略差于 `baseline (69.14)`，也明显差于 `value_reproj_normed (66.26)`。这说明“暴力扩成二维前缀区域”并不是当前最优方向。
+- 验证：服务器生成了 `artifacts/wikitext103probe_depth_memory_2d_prefix_2000.json`，训练进程已结束。
+- 下一步：如果继续挖这条线，应考虑给二维 memory 区加门控、只保留最近几层前缀，或者把二维区域和当前层 token 区分块归一化。
+
+### [步骤 095] - 2026-03-31 11:30 CST - 新增用注意力替代 FFN 的文本分支
+- 请求：以 `value_reproj_normed` 为 attention 子层基础，再设计一种“退化版注意力”替代原本的全连接层。用户要求是：`x` 先归一化，只乘一个矩阵得到 `q`，然后 `q` 同时查询当前层前缀 `q` 和同列历史 `q`，聚合对应的 `x`，再乘 `W_0` 并过激活函数。
+- 计划：新增一个 FFN 替代模块，并通过一个新的总开关把 attention 子层固定为 `value_reproj_normed`、FFN 子层切换为这个 `q-attention` 模块。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `dev_log.md`
+- 修改内容：新增 `FeedForwardQAttention`；在 `TransformerBlock` 中支持 `ffn_type='q_attn'`；新增总配置名 `depth_memory_value_reproj_normed_ffn_qattn`，使 attention 子层用 `value_reproj_normed`，FFN 子层用新的退化版注意力。
+- 原因：用户希望形成两种注意力机制并存的 block：一种替代原来的自注意力层，一种替代原来的前馈全连接层。
+- 关键信息：当前 FFN 替代模块使用 `LN(x)` 作为值源，仅做一层 `W_q` 投影生成查询；得分是“当前层前缀 q + 同列历史 q”，输出是 `Attn(x) -> W_0 -> GELU`，外部残差路径仍沿用原 block 结构。
+- 影响：这条分支引入了第二种跨层缓存 `FFNCache`，但不改现有主线结果；只有显式选择 `depth_memory_value_reproj_normed_ffn_qattn` 才会启用。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`；本地前向/反向 smoke test 通过，`TinyDecoderLM(attention_type='depth_memory_value_reproj_normed_ffn_qattn')` 能输出 `(2, 16, 128)`。
+- 下一步：把这条新分支同步到服务器，在文本主配置上先跑一轮短程 probe。

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 
 KVCache = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+FFNCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class MultiHeadAttentionBase(nn.Module):
@@ -381,6 +382,62 @@ class Top1MoE(nn.Module):
         return self.dropout(chosen * top_probs)
 
 
+class FeedForwardQAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+
+    def _split_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = tensor.shape
+        return tensor.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, _, seq_len, _ = tensor.shape
+        return tensor.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_ffn: Optional[List[FFNCache]] = None,
+    ) -> Tuple[torch.Tensor, FFNCache]:
+        q = self._split_heads(self.q_proj(x))
+        values = self._split_heads(x)
+        seq_len = x.size(1)
+        token_scores = torch.matmul(q, q.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
+
+        if past_ffn:
+            past_queries = torch.stack([item[0] for item in past_ffn], dim=3)
+            past_values = torch.stack([item[1] for item in past_ffn], dim=3)
+            memory_scores = (q.unsqueeze(3) * past_queries).sum(dim=-1) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = torch.softmax(scores, dim=-1)
+            weights = self.dropout(weights)
+            token_weights = weights[..., :seq_len]
+            memory_weights = weights[..., seq_len:]
+            token_context = torch.matmul(token_weights, values)
+            memory_context = (memory_weights.unsqueeze(-1) * past_values).sum(dim=3)
+            context = token_context + memory_context
+        else:
+            weights = torch.softmax(token_scores, dim=-1)
+            weights = self.dropout(weights)
+            context = torch.matmul(weights, values)
+
+        output = self.activation(self.out_proj(self._merge_heads(context)))
+        return output, (q, values)
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -428,6 +485,8 @@ class TransformerBlock(nn.Module):
             )
         elif ffn_type == "moe":
             self.mlp = Top1MoE(d_model, mlp_ratio * d_model, num_experts, dropout)
+        elif ffn_type == "q_attn":
+            self.mlp = FeedForwardQAttention(d_model, num_heads, dropout)
         else:
             raise ValueError(f"Unsupported ffn_type: {ffn_type}")
 
@@ -435,18 +494,23 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         past_kv: Optional[List[KVCache]] = None,
-    ) -> Tuple[torch.Tensor, KVCache]:
+        past_ffn: Optional[List[FFNCache]] = None,
+    ) -> Tuple[torch.Tensor, KVCache, Optional[FFNCache]]:
         attn_out, current_kv = self.attn(self.attn_norm(x), past_kv=past_kv)
         if self.attn_residual:
             x = x + attn_out
         else:
             x = attn_out
-        mlp_out = self.mlp(self.mlp_norm(x))
+        if isinstance(self.mlp, FeedForwardQAttention):
+            mlp_out, current_ffn = self.mlp(self.mlp_norm(x), past_ffn=past_ffn)
+        else:
+            mlp_out = self.mlp(self.mlp_norm(x))
+            current_ffn = None
         if self.ffn_residual:
             x = x + mlp_out
         else:
             x = mlp_out
-        return x, current_kv
+        return x, current_kv, current_ffn
 
 
 class TinyDecoderLM(nn.Module):
@@ -487,6 +551,9 @@ class TinyDecoderLM(nn.Module):
         elif attention_type == "attn_residuals_moe":
             block_attention_type = "baseline"
             block_ffn_type = "moe"
+        elif attention_type == "depth_memory_value_reproj_normed_ffn_qattn":
+            block_attention_type = "depth_memory_value_reproj_normed"
+            block_ffn_type = "q_attn"
         else:
             block_attention_type = attention_type
             block_ffn_type = "dense"
@@ -562,8 +629,15 @@ class TinyDecoderLM(nn.Module):
             return self.lm_head(x)
 
         past_kv: List[KVCache] = []
+        past_ffn: List[FFNCache] = []
         for block in self.blocks:
-            x, current_kv = block(x, past_kv=past_kv)
+            x, current_kv, current_ffn = block(
+                x,
+                past_kv=past_kv,
+                past_ffn=past_ffn if past_ffn else None,
+            )
             past_kv.append(current_kv)
+            if current_ffn is not None:
+                past_ffn.append(current_ffn)
         x = self.final_norm(x)
         return self.lm_head(x)
