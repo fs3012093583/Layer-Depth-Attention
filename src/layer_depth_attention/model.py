@@ -204,10 +204,9 @@ class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
         d_model: int,
         num_heads: int,
         dropout: float,
-        column_q_proj: nn.Linear,
     ) -> None:
         super().__init__(d_model, num_heads, dropout)
-        self.column_q_proj = column_q_proj
+        self.column_q_proj = nn.Linear(d_model, d_model)
 
     def forward(
         self,
@@ -347,7 +346,6 @@ class TransformerBlock(nn.Module):
         attention_type: str,
         ffn_type: str,
         num_experts: int,
-        shared_column_q_proj: Optional[nn.Linear],
         attn_residual: bool,
         ffn_residual: bool,
     ) -> None:
@@ -364,13 +362,10 @@ class TransformerBlock(nn.Module):
         elif attention_type == "depth_memory_value_reproj_normed":
             self.attn = LayerDepthValueReprojNormedAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj_dualq":
-            if shared_column_q_proj is None:
-                raise ValueError("depth_memory_value_reproj_dualq requires shared_column_q_proj")
             self.attn = LayerDepthValueReprojDualQAttention(
                 d_model,
                 num_heads,
                 dropout,
-                shared_column_q_proj,
             )
         elif attention_type == "depth_memory_qkv_reproj":
             self.attn = LayerDepthQKVReprojAttention(d_model, num_heads, dropout)
@@ -427,9 +422,6 @@ class TinyDecoderLM(nn.Module):
         self.attention_type = attention_type
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
-        self.shared_column_q_proj = (
-            nn.Linear(d_model, d_model) if attention_type == "depth_memory_value_reproj_dualq" else None
-        )
         residual_attention_types = {
             "attn_residuals",
             "attn_residuals_value_reproj",
@@ -461,7 +453,6 @@ class TinyDecoderLM(nn.Module):
                     attention_type=block_attention_type,
                     ffn_type=block_ffn_type,
                     num_experts=num_experts,
-                    shared_column_q_proj=self.shared_column_q_proj,
                     attn_residual=attn_residual,
                     ffn_residual=ffn_residual,
                 )

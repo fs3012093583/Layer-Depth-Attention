@@ -979,3 +979,36 @@
 - Side effects: Earlier expectations for this variant should no longer compare it directly to `value_reproj`; the current experiment now isolates the effect of using different row/column query projections.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `TinyDecoderLM(attention_type='depth_memory_value_reproj_dualq')`.
 - Next step: Commit the corrected dual-query semantics, sync to the server, and run the large-scale benchmark.
+
+### [Step 084] - 2026-03-31 09:09 CST - Complete the 2000-step dual-query direct-memory benchmark
+- Request: Evaluate the corrected dual-query variant under the main long-budget benchmark.
+- Plan: Sync commit `a90b77a` to the Windows server and run `depth_memory_value_reproj_dualq` for `2000` steps with progress printed every `300` steps.
+- Files touched: `dev_log.md`
+- Modification: Completed the remote CUDA run and recorded the metrics from `artifacts/wikitext103probe_depth_memory_value_reproj_dualq_bs8_2000.json`.
+- Rationale: This is the first full test of the "row query layer-specific + column query globally shared + direct historical K/V reuse" design.
+- Key details: Logged validation losses were `8.5664`, `5.5497`, `4.5682`, `4.1851`, `3.9969`, `3.9147`, `3.8850` at steps `300/600/900/1200/1500/1800/2000`. Final metrics were `test_loss=4.1970`, `test_ppl=66.49`. This slightly improves over `value_reproj` (`66.67`) and remains very close to `value_reproj_normed` (`66.26`), while still trailing `Attention Residuals` (`60.62`).
+- Side effects: The current evidence suggests that separating row and column queries helps a little even without memory reprojection, but the gain is still modest.
+- Verification: Remote 2000-step CUDA benchmark completed successfully and wrote the artifact file.
+- Next step: Compare whether the shared-column-query idea combines better with normalization or with stronger residual-attention baselines, or stop here and consolidate the current mechanism findings for paper positioning.
+
+### [Step 085] - 2026-03-31 09:18 CST - Switch the dual-query branch to per-layer column queries
+- Request: Change the dual-query implementation so the same-column `W_Q^{col}` is no longer shared across all layers, and add a dedicated experiment-summary Markdown file.
+- Plan: Remove the model-level shared column-query projection, let each `depth_memory_value_reproj_dualq` block instantiate its own `column_q_proj`, verify locally, and create a standalone notes file for method names and long-run benchmark results.
+- Files touched: `src/layer_depth_attention/model.py`, `experiment_notes.md`, `dev_log.md`
+- Modification: Reworked `LayerDepthValueReprojDualQAttention` so each block creates its own `nn.Linear(d_model, d_model)` for the column query, removed the `TinyDecoderLM` and `TransformerBlock` plumbing for a shared column-query projection, and added `experiment_notes.md` summarizing method definitions and the main `2000`-step comparison table.
+- Rationale: The user wants the dual-query variant to use a separate same-column query mapping per layer rather than a single globally shared mapping.
+- Key details: The current semantics of `depth_memory_value_reproj_dualq` are now: row query from each block's native `qkv_proj`, column query from a per-block `column_q_proj`, and direct reuse of historical same-position `K/V` with no memory reprojection.
+- Side effects: The previously reported `66.49` result belongs to the older shared-column-query version and should not be reused as the result for the current implementation.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `TinyDecoderLM(attention_type='depth_memory_value_reproj_dualq')`.
+- Next step: If needed, rerun the long-budget benchmark for the updated per-layer-column-query version and compare it against the old shared-column-query result.
+
+### [步骤 086] - 2026-03-31 09:24 CST - 切换为中文记录并准备重跑独立列查询版本
+- 请求：从现在开始使用中文记录实验和操作，并启动“每层独立同列 `W_Q`”版本的正式实验。
+- 计划：先把当前本地修改提交并同步到服务器，再用统一主配置重新运行 `depth_memory_value_reproj_dualq`，避免继续引用旧的共享列查询结果。
+- 涉及文件：`dev_log.md`
+- 修改内容：新增中文记录约定，并明确接下来要重跑的是“每层独立同列 `W_Q` + 直接复用历史 `K/V`”版本。
+- 原因：用户要求后续实验与操作记录改为中文，同时当前代码语义已经变化，需要新结果覆盖旧结果。
+- 关键信息：旧结果 `test_ppl=66.49` 只对应“全层共享同列 `W_Q`”实现，不能再代表当前版本。
+- 影响：从这一条开始，后续新增实验记录优先使用中文；历史英文记录保留不改。
+- 验证：尚未开始服务器重跑。
+- 下一步：提交当前修改，推送到仓库，服务器拉取后启动 2000-step 实验。
