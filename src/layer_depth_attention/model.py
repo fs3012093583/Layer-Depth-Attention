@@ -198,6 +198,63 @@ class LayerDepthValueReprojNormedAttention(MultiHeadAttentionBase):
         return self.out_proj(self._merge_heads(attn)), (k, v, q)
 
 
+class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        dropout: float,
+        column_q_proj: nn.Linear,
+    ) -> None:
+        super().__init__(d_model, num_heads, dropout)
+        self.column_q_proj = column_q_proj
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[List[KVCache]] = None,
+    ) -> Tuple[torch.Tensor, KVCache]:
+        q_row, k, v = self._split_qkv(x)
+        q_col = self._split_projected(self.column_q_proj(x))
+        seq_len = x.size(1)
+
+        token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
+
+        if past_kv:
+            past_values = torch.stack([item[1] for item in past_kv], dim=3)
+            num_past_layers = past_values.size(3)
+            past_values_full = (
+                past_values.permute(0, 2, 3, 1, 4)
+                .contiguous()
+                .view(x.size(0), seq_len, num_past_layers, -1)
+            )
+            reproj_inputs = past_values_full.view(x.size(0), seq_len * num_past_layers, -1)
+            reproj_keys, reproj_values = self._kv_proj(reproj_inputs)
+            reproj_keys = reproj_keys.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
+            reproj_values = reproj_values.view(x.size(0), self.num_heads, seq_len, num_past_layers, self.head_dim)
+
+            memory_scores = (q_col.unsqueeze(3) * reproj_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = torch.softmax(scores, dim=-1)
+            weights = self.dropout(weights)
+            token_weights = weights[..., :seq_len]
+            memory_weights = weights[..., seq_len:]
+            token_context = torch.matmul(token_weights, v)
+            memory_context = (memory_weights.unsqueeze(-1) * reproj_values).sum(dim=3)
+            attn = token_context + memory_context
+        else:
+            weights = torch.softmax(token_scores, dim=-1)
+            weights = self.dropout(weights)
+            attn = torch.matmul(weights, v)
+
+        return self.out_proj(self._merge_heads(attn)), (k, v, q_row)
+
+
 class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
     def forward(
         self,
@@ -300,6 +357,7 @@ class TransformerBlock(nn.Module):
         attention_type: str,
         ffn_type: str,
         num_experts: int,
+        shared_column_q_proj: Optional[nn.Linear],
         attn_residual: bool,
         ffn_residual: bool,
     ) -> None:
@@ -315,6 +373,15 @@ class TransformerBlock(nn.Module):
             self.attn = LayerDepthValueReprojAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj_normed":
             self.attn = LayerDepthValueReprojNormedAttention(d_model, num_heads, dropout)
+        elif attention_type == "depth_memory_value_reproj_dualq":
+            if shared_column_q_proj is None:
+                raise ValueError("depth_memory_value_reproj_dualq requires shared_column_q_proj")
+            self.attn = LayerDepthValueReprojDualQAttention(
+                d_model,
+                num_heads,
+                dropout,
+                shared_column_q_proj,
+            )
         elif attention_type == "depth_memory_qkv_reproj":
             self.attn = LayerDepthQKVReprojAttention(d_model, num_heads, dropout)
         else:
@@ -370,6 +437,9 @@ class TinyDecoderLM(nn.Module):
         self.attention_type = attention_type
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        self.shared_column_q_proj = (
+            nn.Linear(d_model, d_model) if attention_type == "depth_memory_value_reproj_dualq" else None
+        )
         residual_attention_types = {
             "attn_residuals",
             "attn_residuals_value_reproj",
@@ -401,6 +471,7 @@ class TinyDecoderLM(nn.Module):
                     attention_type=block_attention_type,
                     ffn_type=block_ffn_type,
                     num_experts=num_experts,
+                    shared_column_q_proj=self.shared_column_q_proj,
                     attn_residual=attn_residual,
                     ffn_residual=ffn_residual,
                 )

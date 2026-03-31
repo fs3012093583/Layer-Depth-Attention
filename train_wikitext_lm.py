@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
             "depth_memory_qkv_reproj",
             "depth_memory_value_reproj",
             "depth_memory_value_reproj_normed",
+            "depth_memory_value_reproj_dualq",
             "attn_residuals",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",

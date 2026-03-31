@@ -946,3 +946,25 @@
 - Side effects: The local `git daemon` must be running for the server to fetch from the ZeroTier source.
 - Verification: Server `git ls-remote git://10.147.20.35:9418/Layer-Depth-Attention-zt.git` succeeded; server `git reset --hard zerotier-local/main` succeeded.
 - Next step: Use `git push zerotier-local main` locally after code changes, then `git fetch zerotier-local && git reset --hard zerotier-local/main` on the server before launching experiments.
+
+### [Step 081] - 2026-03-31 02:44 CST - Record the final normalized QKV-reprojection result
+- Request: Rerun `depth_memory_qkv_reproj` after correcting its semantics and adding pre-projection normalization, then compare it against the value-only branches.
+- Plan: Use the ZeroTier sync path to update the server to the corrected code and complete the full `2000`-step benchmark with `300`-step logging.
+- Files touched: `dev_log.md`
+- Modification: Recorded the finished normalized `depth_memory_qkv_reproj` run from `artifacts/wikitext103probe_depth_memory_qkv_reproj_bs8_2000_v4.json`.
+- Rationale: Earlier `depth_memory_qkv_reproj` numbers referred to obsolete semantics and should not be used for the final comparison table.
+- Key details: The corrected+normalized run logged validation losses `8.7440`, `5.6381`, `4.6261`, `4.2259`, `4.0336`, `3.9515`, `3.9154` at steps `300/600/900/1200/1500/1800/2000`, and finished with `test_loss=4.1991`, `test_ppl=66.63`. This essentially matches `value_reproj` (`66.67`) and remains slightly behind `value_reproj_normed` (`66.26`).
+- Side effects: The current mechanism conclusion should use this normalized v4 result, not the earlier `68.17` run from the old semantics.
+- Verification: Remote CUDA run completed and the artifact contents were inspected.
+- Next step: Explore whether a better query design can improve the value-reprojection branch further without losing the projection-consistency benefit.
+
+### [Step 082] - 2026-03-31 03:03 CST - Add a dual-query value-reprojection variant
+- Request: Based on `value_reproj`, introduce two query projections: one for same-row token attention and one for same-column depth-memory attention, with the column query shared across all layers rather than recreated per layer.
+- Plan: Add a new attention type that keeps the current layer's native query for token-to-token scores, adds a model-level shared `W_Q` for column/depth retrieval, wires the option through the training CLI, and verify the variant locally before any remote run.
+- Files touched: `src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `dev_log.md`
+- Modification: Added `LayerDepthValueReprojDualQAttention`, extended `TransformerBlock` and `TinyDecoderLM` so a single `shared_column_q_proj` is created once at model construction time and reused by every block, and exposed the new option as `depth_memory_value_reproj_dualq` in `train_wikitext_lm.py`.
+- Rationale: The user wants row attention and column/depth retrieval to use different query projections while ensuring the column-side query mapping is globally shared across depth.
+- Key details: The current implementation keeps token scores on the existing layer-specific `q_row` from `qkv_proj`, uses the shared `column_q_proj` only for memory scores, and leaves the memory value path identical to the current non-normalized `value_reproj` branch.
+- Side effects: This adds one new global projection matrix to the model only when the dual-query attention type is selected.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`; local pure-`torch` forward/backward smoke on `TinyDecoderLM(attention_type='depth_memory_value_reproj_dualq')`.
+- Next step: Commit the dual-query implementation, sync it to the server through ZeroTier, and run the large-scale benchmark to see whether separating row/column queries improves over `value_reproj`.
