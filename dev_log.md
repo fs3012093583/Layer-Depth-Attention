@@ -1012,3 +1012,36 @@
 - 影响：从这一条开始，后续新增实验记录优先使用中文；历史英文记录保留不改。
 - 验证：尚未开始服务器重跑。
 - 下一步：提交当前修改，推送到仓库，服务器拉取后启动 2000-step 实验。
+
+### [步骤 087] - 2026-03-31 09:26 CST - 完成每层独立列查询版本的 2000 步实验
+- 请求：重跑 `depth_memory_value_reproj_dualq`，但这次同列 `W_Q` 改为每层独立，不再全层共享。
+- 计划：将提交 `00a0521` 同步到服务器，保持主配置不变，运行 `2000` 步并每 `300` 步输出一次验证日志。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录服务器端实验 `artifacts/wikitext103probe_depth_memory_value_reproj_dualq_perlayer_bs8_2000.json` 的完整结果。
+- 原因：当前代码语义已经从“共享同列 `W_Q`”切换到“每层独立同列 `W_Q`”，必须用新结果替换旧版本结论。
+- 关键信息：验证集日志依次为：`step 300 val_loss=8.6385`、`600=5.5330`、`900=4.6575`、`1200=4.2935`、`1500=4.1117`、`1800=4.0180`、`2000=3.9862`。最终 `test_loss=4.2056`、`test_ppl=67.06`。
+- 影响：该版本仍明显优于 `baseline (69.14)` 和原始 `depth_memory (68.89)`，但略弱于旧的共享列查询版本 `66.49`，也弱于 `value_reproj (66.67)` 与 `value_reproj_normed (66.26)`。
+- 验证：服务器 CUDA 训练完成，结果文件已生成并检查。
+- 下一步：更新实验总表，明确区分“共享列查询版本”和“每层独立列查询版本”，避免混淆。
+
+### [步骤 088] - 2026-03-31 09:34 CST - 切换到 CIFAR100 视觉基准
+- 请求：不要只停留在语言模型上，尝试用 CIFAR100 再跑一轮，看看方法在视觉任务上是否也有信号。
+- 计划：先确认服务器上的 CIFAR100 数据路径，再补一个最小可比的小型 ViT 训练入口，用统一骨架比较 `baseline` 和候选注意力变体。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录了 CIFAR100 数据位置与接下来的实现方向。
+- 原因：用户希望把当前注意力机制放到行业常见的小型视觉分类基准上验证，而不是只看文本任务。
+- 关键信息：服务器上已存在 `D:\Projects\data\cifar-100-python` 与 `D:\Projects\data\cifar-100-python.tar.gz`；`torchvision` 可用，因此不需要额外下载数据依赖。
+- 影响：接下来会新增一个视觉训练入口；语言模型主线代码保持不变。
+- 验证：已确认服务器存在 CIFAR100 数据目录，且 `torchvision` 可导入。
+- 下一步：实现 CIFAR100 小型 ViT 训练脚本，并接入当前注意力变体做短程探测实验。
+
+### [步骤 089] - 2026-03-31 09:41 CST - 补齐 CIFAR100 小型 ViT 训练入口
+- 请求：在 CIFAR100 上快速验证现有注意力机制是否也能工作。
+- 计划：新增一个最小可比的 ViT 训练脚本和视觉版 attention/block 实现，先只支持 `baseline` 与 `depth_memory_value_reproj_normed` 两条，足够跑首轮探测。
+- 涉及文件：`src/layer_depth_attention/vision_model.py`, `train_cifar100_vit.py`, `dev_log.md`
+- 修改内容：新增 `TinyVisionTransformer`、patch embedding、视觉版 baseline attention、视觉版 `value_reproj_normed` attention，以及对应的 CIFAR100 训练入口。
+- 原因：现有语言模型训练代码带因果掩码，不适合直接用于 CIFAR100 图像分类；需要一个非因果的视觉序列骨架。
+- 关键信息：当前视觉基线采用 `32x32` 输入、`4x4` patch、`[CLS]` 分类 token、小型 ViT 主干；首轮只比较最基础和最稳的一个自家变体，避免一次铺太多分支。
+- 影响：项目现在同时具备文本与视觉两条实验入口，但两者代码相互独立，减少互相污染。
+- 验证：`python -m py_compile src/layer_depth_attention/vision_model.py train_cifar100_vit.py`；本地前向/反向 smoke test 通过，`baseline` 与 `depth_memory_value_reproj_normed` 都能输出 `(2, 100)`。
+- 下一步：提交当前改动，同步到服务器，在 CIFAR100 上先跑一轮短程 probe。
