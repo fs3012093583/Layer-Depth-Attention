@@ -41,6 +41,15 @@
 - `attn_residuals_value_reproj_normed`
   Attention Residuals combined with normalized value reprojection.
 
+- `depth_memory_value_reproj_normed_ffn_qattn`
+  Attention 子层使用 `depth_memory_value_reproj_normed`，FFN 子层不再使用两层全连接，而是使用基于归一化 `x` 的退化版 `q-attention`。
+  该 FFN 替代层使用一层 `W_q` 生成查询，查询当前层前缀 `q` 和同列历史 `q`，聚合对应的归一化 `x` 后再经 `W_0` 与激活函数输出。
+
+- `depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq`
+  Attention 子层与 FFN 子层都使用“双查询”形式。
+  行内前缀检索使用 `q_row`，同列历史检索使用独立的 `q_col`。
+  Attention 子层基于 `value_reproj_normed`，FFN 子层则用退化版双查询 `q-attention` 取代原两层全连接。
+
 ## 2000-Step Results
 
 | Method | Val Loss | Val PPL | Test Loss | Test PPL |
@@ -54,6 +63,7 @@
 | `depth_memory_value_reproj_dualq` | 3.9862 | 53.85 | 4.2056 | 67.06 |
 | `attn_residuals` | 3.8722 | 48.05 | 4.1046 | 60.62 |
 | `attn_residuals_value_reproj_normed` | 3.8653 | 47.72 | 4.1274 | 62.01 |
+| `depth_memory_value_reproj_normed_ffn_qattn` | 4.0044 | 54.84 | 4.2547 | 70.44 |
 
 ## Current Reading
 
@@ -62,6 +72,7 @@
 - Adding historical `Q/K` into reprojection does not clearly beat the simpler value-only route.
 - 双查询方向本身有信号，但在当前主配置下，“全层共享同列查询”优于“每层独立同列查询”。
 - 当前最强的非 `Attention Residuals` 版本仍然是 `depth_memory_value_reproj_normed`。
+- 直接用退化版 q-attention 替代 FFN，在当前文本主配置下没有带来收益；即使长训到 `2000 step`，最终仍略差于 `baseline`。
 - `Attention Residuals` remains the strongest comparator in the current benchmark.
 
 ## CIFAR100 Probe

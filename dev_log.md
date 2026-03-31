@@ -1116,3 +1116,36 @@
 - 影响：这条分支引入了第二种跨层缓存 `FFNCache`，但不改现有主线结果；只有显式选择 `depth_memory_value_reproj_normed_ffn_qattn` 才会启用。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`；本地前向/反向 smoke test 通过，`TinyDecoderLM(attention_type='depth_memory_value_reproj_normed_ffn_qattn')` 能输出 `(2, 16, 128)`。
 - 下一步：把这条新分支同步到服务器，在文本主配置上先跑一轮短程 probe。
+
+### [步骤 096] - 2026-03-31 11:37 CST - 完成 attention+FFN 双注意力版本的首轮 probe
+- 请求：启动“attention 用 `value_reproj_normed`，FFN 用退化版 q-attention”这一新结构的文本实验。
+- 计划：先用主线文本大配置做 `300` 步 probe，判断它的优化趋势是否正常，再决定是否值得拉到长训练。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录了 `depth_memory_value_reproj_normed_ffn_qattn` 的首轮结果。
+- 原因：这条结构同时改了 attention 子层和 FFN 子层，必须先看是不是一开始就优化困难。
+- 关键信息：配置为 `wikitext-103-probe`、`d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=8`、`steps=300`。验证集从 `step 50 val_loss=22.9042` 降到 `step 300 val_loss=11.6088`，最终 `test_loss=12.6819`、`test_ppl=321867.58`。
+- 影响：这条“attention+FFN 双注意力”版本在当前主配置下明显难优化，首轮 probe 比 `value_reproj_normed` 主线差很多，暂时不值得直接拉到 2000 步。
+- 验证：服务器生成了 `artifacts/wikitext103probe_value_reproj_normed_ffn_qattn_probe.json`，训练已结束。
+- 下一步：如果继续挖这条线，应先弱化 FFN 侧记忆范围、加门控或改回更接近线性层的形态，而不是直接长训。
+
+### [步骤 097] - 2026-03-31 12:05 CST - 完成 attention+FFN 双注意力版本的 2000 步长训
+- 请求：用户明确要求不要停留在 probe，直接把 `depth_memory_value_reproj_normed_ffn_qattn` 拉到 `2000 step` 看最终表现。
+- 计划：保持主线文本配置不变，在 `wikitext-103-probe` 上运行 `2000` 步，并按 `300 step` 间隔输出验证日志，判断这条“双注意力”结构是单纯收敛慢，还是最终效果本身不佳。
+- 涉及文件：`dev_log.md`, `experiment_notes.md`
+- 修改内容：记录了 `depth_memory_value_reproj_normed_ffn_qattn` 的 `2000 step` 完整结果，并同步更新总表。
+- 原因：`300` 步 probe 极差，但这类更重的结构可能只是需要更长训练预算，必须看长训终态。
+- 关键信息：配置为 `wikitext-103-probe`、`d_model=384`、`num_layers=16`、`seq_len=256`、`batch_size=8`、`steps=2000`、`eval_interval=300`。验证集依次为 `step 300 val_loss=8.6446`、`600=5.5463`、`900=4.6046`、`1200=4.2546`、`1500=4.1014`、`1800=4.0306`、`2000=4.0044`。最终 `test_loss=4.2547`、`test_ppl=70.44`。
+- 影响：这条“attention 用 value_reproj_normed、FFN 用 q-attention”的双注意力版本在长训后虽然可以稳定收敛，但最终仍差于 `baseline (69.14)`，更明显落后于 `value_reproj_normed (66.26)`。说明当前 FFN 侧的退化版注意力替代还没有带来正收益。
+- 验证：服务器生成了 `artifacts/wikitext103probe_value_reproj_normed_ffn_qattn_2000.json`，训练进程已结束，日志完整。
+- 下一步：如果继续沿 FFN 替代线推进，应优先缩小 FFN attention 的记忆范围、加入 gate，或把它改成线性层的增量项，而不是继续直接堆长训练。
+
+### [步骤 098] - 2026-03-31 12:18 CST - 新增 attention 与 FFN 同时使用双 q 的文本变体
+- 请求：用户要求把“同行用一个 q、同列用另一个 q”的设定同时应用到 FFN 替代层和 attention 层。
+- 计划：不覆盖已有结果，新增一个显式新分支，让 attention 与 FFN 都拆成 `q_row` / `q_col` 两套查询，并先做本地编译与前反向 smoke test。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `experiment_notes.md`, `memory/events.jsonl`, `memory/summaries.md`, `dev_log.md`
+- 修改内容：新增 `LayerDepthValueReprojNormedDualQAttention` 与 `FeedForwardDualQAttention`；新增总开关 `depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq`；补上 `memory/` 目录下的最小分层记忆文件。
+- 原因：当前 `value_reproj_normed` attention 和 `ffn_qattn` 版本都只有一套 `q`，不满足“行内检索和列内检索使用不同查询”的新设计要求。
+- 关键信息：新 attention 子层中，`q_row` 负责当前层 token 前缀注意力，`q_col` 负责同列历史 memory 检索；新 FFN 子层中，`q_row` 负责当前层前缀 `q`，`q_col` 负责同列历史 `q`，缓存只保留 `q_col` 与对应值。
+- 影响：旧实验结果保持不变，新结构作为单独方法存在，便于后续直接做服务器实验而不污染已有结论。
+- 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 smoke test `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq')` 前向与反向通过，输出形状 `(2, 16, 128)`，参数量 `143488`。
+- 下一步：如果继续，就把这个新分支同步到服务器，在文本主配置上先跑一轮短程 probe，再决定是否拉到 `2000 step`。
