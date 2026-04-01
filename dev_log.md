@@ -55,3 +55,14 @@
 - Side effects: Existing older launch scripts remain unchanged; this avoids rewriting prior experiment baselines.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py scripts/train_wikitext_lm.py` passed; local `TinyDecoderLM(attention_type='dual_axis_full')` forward/backward smoke test passed with output shape `(2, 32, 128)`.
 - Next step: Sync the code to the server and start the new `dual_axis_full_true_bs8_s20000_eval100` run.
+
+### [Step 005] - 2026-04-02 20:43 CST - Revert dual-axis-full eval batch count for fair comparison
+- Request: Stop the just-started run and revert the evaluation batch count from `100` back to `20` so the new `dual_axis_full` result remains directly comparable to earlier runs.
+- Plan: Kill the active server-side Python job, change only the dedicated `20000`-step launch script to use `eval_batches=20`, and keep all model/optimization settings unchanged.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_dual_axis_full_true_bs8_s20000_eval20.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Stopped the running `dual_axis_full_true_bs8_s20000_eval100` process, changed the script to `eval_batches=20`, and renamed the script/output/run label from `eval100` to `eval20` to avoid future confusion.
+- Rationale: The higher evaluation sample size reduces variance but materially changes runtime cost and monitoring cadence, making this run less comparable to the earlier `dual_axis_full` controls.
+- Key details: The script still uses the same `20000` steps, `bs=8`, `grad_accum_steps=2`, `seq_len=512`, `d_model=384`, and the already-fixed `_attn_res_mix` scaling.
+- Side effects: The aborted `eval100` run should be ignored; its partial monitoring record is not part of the fair-comparison set.
+- Verification: Server `python.exe` process was terminated successfully via `taskkill /F /IM python.exe`.
+- Next step: Push the `eval20` script update, resync the server, and restart the run with SwanLab.
