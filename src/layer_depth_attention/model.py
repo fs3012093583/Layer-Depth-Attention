@@ -20,6 +20,7 @@ class MultiHeadAttentionBase(nn.Module):
         self.qkv_proj = nn.Linear(d_model, 3 * d_model)
         self.out_proj = nn.Linear(d_model, d_model)
         self.dropout = nn.Dropout(dropout)
+        self._causal_mask_cache: dict[tuple[int, torch.device], torch.Tensor] = {}
 
     def _split_qkv(self, x: torch.Tensor) -> KVCache:
         batch_size, seq_len, d_model = x.shape
@@ -48,6 +49,14 @@ class MultiHeadAttentionBase(nn.Module):
         v = torch.nn.functional.linear(x, v_weight, v_bias)
         return self._split_projected(k), self._split_projected(v)
 
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        key = (seq_len, device)
+        mask = self._causal_mask_cache.get(key)
+        if mask is None:
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
+            self._causal_mask_cache[key] = mask
+        return mask
+
 
 class CausalSelfAttention(MultiHeadAttentionBase):
     def forward(
@@ -59,15 +68,58 @@ class CausalSelfAttention(MultiHeadAttentionBase):
         q, k, v = self._split_qkv(x)
         seq_len = x.size(1)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         scores = scores.masked_fill(causal_mask, float("-inf"))
         weights = torch.softmax(scores, dim=-1)
         weights = self.dropout(weights)
         attn = torch.matmul(weights, v)
         return self.out_proj(self._merge_heads(attn)), (k, v, q)
+
+
+class DualAxisMemoryAttention(MultiHeadAttentionBase):
+    def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
+        super().__init__(d_model, num_heads, dropout)
+        self.column_q_proj = nn.Linear(d_model, d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[List[KVCache]] = None,
+        past_states: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, KVCache]:
+        del past_kv
+        q_row, k, v = self._split_qkv(x)
+        q_col = self._split_projected(self.column_q_proj(x))
+        seq_len = x.size(1)
+
+        token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        token_scores = token_scores.masked_fill(self._causal_mask(seq_len, x.device), float("-inf"))
+
+        if past_states:
+            memory_bank = torch.stack(past_states, dim=2)
+            memory_bank = F.layer_norm(memory_bank, (memory_bank.size(-1),))
+            batch_size, memory_seq_len, num_past_layers, _ = memory_bank.shape
+            memory_bank = memory_bank.view(
+                batch_size,
+                memory_seq_len,
+                num_past_layers,
+                self.num_heads,
+                self.head_dim,
+            ).permute(0, 3, 1, 2, 4)
+
+            memory_scores = (q_col.unsqueeze(3) * memory_bank).sum(dim=-1) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = self.dropout(torch.softmax(scores, dim=-1))
+            token_weights = weights[..., :seq_len]
+            memory_weights = weights[..., seq_len:]
+            token_context = torch.matmul(token_weights, v)
+            memory_context = (memory_weights.unsqueeze(-1) * memory_bank).sum(dim=3)
+            attn = token_context + memory_context
+        else:
+            weights = self.dropout(torch.softmax(token_scores, dim=-1))
+            attn = torch.matmul(weights, v)
+
+        return self.out_proj(self._merge_heads(attn)), (k, v, q_row)
 
 
 class LayerDepthMemoryAttention(MultiHeadAttentionBase):
@@ -80,10 +132,7 @@ class LayerDepthMemoryAttention(MultiHeadAttentionBase):
         batch_size, _, seq_len, _ = q.shape
 
         token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -116,10 +165,7 @@ class LayerDepthValueReprojAttention(MultiHeadAttentionBase):
         seq_len = x.size(1)
 
         token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -162,10 +208,7 @@ class LayerDepthValueReprojNormedAttention(MultiHeadAttentionBase):
         seq_len = x.size(1)
 
         token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -219,10 +262,7 @@ class LayerDepthValueReprojDualQAttention(MultiHeadAttentionBase):
         seq_len = x.size(1)
 
         token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -265,10 +305,7 @@ class LayerDepthValueReprojNormedDualQAttention(MultiHeadAttentionBase):
         seq_len = x.size(1)
 
         token_scores = torch.matmul(q_row, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -312,10 +349,7 @@ class LayerDepthQKVReprojAttention(MultiHeadAttentionBase):
         seq_len = x.size(1)
 
         token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -376,10 +410,7 @@ class LayerDepth2DPrefixAttention(MultiHeadAttentionBase):
         q, k, v = self._split_qkv(x)
         seq_len = x.size(1)
         token_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_kv:
@@ -470,10 +501,7 @@ class FeedForwardQAttention(nn.Module):
         values = self._split_heads(x)
         seq_len = x.size(1)
         token_scores = torch.matmul(q, q.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_ffn:
@@ -528,10 +556,7 @@ class FeedForwardDualQAttention(nn.Module):
         values = self._split_heads(x)
         seq_len = x.size(1)
         token_scores = torch.matmul(q_row, q_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        causal_mask = torch.triu(
-            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
-            diagonal=1,
-        )
+        causal_mask = self._causal_mask(seq_len, x.device)
         token_scores = token_scores.masked_fill(causal_mask, float("-inf"))
 
         if past_ffn:
@@ -574,6 +599,8 @@ class TransformerBlock(nn.Module):
         self.attn_norm = nn.LayerNorm(d_model)
         if attention_type == "baseline":
             self.attn = CausalSelfAttention(d_model, num_heads, dropout)
+        elif attention_type == "dual_axis_memory":
+            self.attn = DualAxisMemoryAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory":
             self.attn = LayerDepthMemoryAttention(d_model, num_heads, dropout)
         elif attention_type == "depth_memory_value_reproj":
@@ -620,8 +647,12 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         past_kv: Optional[List[KVCache]] = None,
         past_ffn: Optional[List[FFNCache]] = None,
+        past_states: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, KVCache, Optional[FFNCache]]:
-        attn_out, current_kv = self.attn(self.attn_norm(x), past_kv=past_kv)
+        if isinstance(self.attn, DualAxisMemoryAttention):
+            attn_out, current_kv = self.attn(self.attn_norm(x), past_kv=past_kv, past_states=past_states)
+        else:
+            attn_out, current_kv = self.attn(self.attn_norm(x), past_kv=past_kv)
         if self.attn_residual:
             x = x + attn_out
         else:
@@ -656,16 +687,28 @@ class TinyDecoderLM(nn.Module):
     ) -> None:
         super().__init__()
         self.attention_type = attention_type
+        self.num_heads = num_heads
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
+        self.head_dim = d_model // num_heads
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_emb = nn.Embedding(max_seq_len, d_model)
         residual_attention_types = {
             "attn_residuals",
+            "attn_residuals_dual_axis",
+            "dual_axis_full",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",
             "attn_residuals_moe",
         }
         if attention_type == "attn_residuals":
             block_attention_type = "baseline"
+            block_ffn_type = "dense"
+        elif attention_type == "attn_residuals_dual_axis":
+            block_attention_type = "baseline"
+            block_ffn_type = "dense"
+        elif attention_type == "dual_axis_full":
+            block_attention_type = "dual_axis_memory"
             block_ffn_type = "dense"
         elif attention_type == "attn_residuals_value_reproj":
             block_attention_type = "depth_memory_value_reproj"
@@ -708,6 +751,10 @@ class TinyDecoderLM(nn.Module):
             nn.init.normal_(self.attn_res_queries, std=0.02)
             nn.init.normal_(self.mlp_res_queries, std=0.02)
             nn.init.normal_(self.final_res_query, std=0.02)
+        if attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+            self.attn_res_row_q_projs = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(num_layers)])
+            self.mlp_res_row_q_projs = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(num_layers)])
+            self.final_res_row_q_proj = nn.Linear(d_model, d_model)
         self.final_norm = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         if tie_weights:
@@ -729,12 +776,47 @@ class TinyDecoderLM(nn.Module):
         weights = torch.softmax(scores, dim=2)
         return torch.einsum("bts,btsd->btd", weights, stacked)
 
+    def _split_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = tensor.shape
+        return tensor.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+    def _merge_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, _, seq_len, _ = tensor.shape
+        return tensor.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+
+    def _residual_row_mix(self, current: torch.Tensor, row_q_proj: nn.Linear) -> torch.Tensor:
+        current = self._rms_norm_tensor(current)
+        q_row = self._split_heads(row_q_proj(current))
+        kv_row = self._split_heads(current)
+        seq_len = current.size(1)
+        scores = torch.matmul(q_row, kv_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=current.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        scores = scores.masked_fill(causal_mask, float("-inf"))
+        weights = torch.softmax(scores, dim=-1)
+        context = torch.matmul(weights, kv_row)
+        return self._merge_heads(context)
+
+    def _attn_res_dual_axis_mix(
+        self,
+        embedding: torch.Tensor,
+        history: List[torch.Tensor],
+        depth_query: torch.Tensor,
+        row_q_proj: nn.Linear,
+    ) -> torch.Tensor:
+        current = history[-1] if history else embedding
+        return self._residual_row_mix(current, row_q_proj) + self._attn_res_mix(embedding, history, depth_query)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
         positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
         x = self.token_emb(input_ids) + self.pos_emb(positions)
         if self.attention_type in {
             "attn_residuals",
+            "attn_residuals_dual_axis",
+            "dual_axis_full",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",
             "attn_residuals_moe",
@@ -743,28 +825,58 @@ class TinyDecoderLM(nn.Module):
             history: List[torch.Tensor] = []
             past_kv: List[KVCache] = []
             for idx, block in enumerate(self.blocks):
-                attn_input = self._attn_res_mix(embedding, history, self.attn_res_queries[idx])
-                attn_out, current_kv = block.attn(block.attn_norm(attn_input), past_kv=past_kv)
+                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+                    attn_input = self._attn_res_dual_axis_mix(
+                        embedding,
+                        history,
+                        self.attn_res_queries[idx],
+                        self.attn_res_row_q_projs[idx],
+                    )
+                else:
+                    attn_input = self._attn_res_mix(embedding, history, self.attn_res_queries[idx])
+                if isinstance(block.attn, DualAxisMemoryAttention):
+                    attn_out, current_kv = block.attn(block.attn_norm(attn_input), past_kv=past_kv, past_states=history)
+                else:
+                    attn_out, current_kv = block.attn(block.attn_norm(attn_input), past_kv=past_kv)
                 history.append(attn_out)
                 past_kv.append(current_kv)
 
-                mlp_input = self._attn_res_mix(embedding, history, self.mlp_res_queries[idx])
+                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+                    mlp_input = self._attn_res_dual_axis_mix(
+                        embedding,
+                        history,
+                        self.mlp_res_queries[idx],
+                        self.mlp_res_row_q_projs[idx],
+                    )
+                else:
+                    mlp_input = self._attn_res_mix(embedding, history, self.mlp_res_queries[idx])
                 mlp_out = block.mlp(block.mlp_norm(mlp_input))
                 history.append(mlp_out)
 
-            x = self._attn_res_mix(embedding, history, self.final_res_query)
+            if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+                x = self._attn_res_dual_axis_mix(
+                    embedding,
+                    history,
+                    self.final_res_query,
+                    self.final_res_row_q_proj,
+                )
+            else:
+                x = self._attn_res_mix(embedding, history, self.final_res_query)
             x = self.final_norm(x)
             return self.lm_head(x)
 
         past_kv: List[KVCache] = []
         past_ffn: List[FFNCache] = []
+        past_states: List[torch.Tensor] = []
         for block in self.blocks:
             x, current_kv, current_ffn = block(
                 x,
                 past_kv=past_kv,
                 past_ffn=past_ffn if past_ffn else None,
+                past_states=past_states if past_states else None,
             )
             past_kv.append(current_kv)
+            past_states.append(x)
             if current_ffn is not None:
                 past_ffn.append(current_ffn)
         x = self.final_norm(x)

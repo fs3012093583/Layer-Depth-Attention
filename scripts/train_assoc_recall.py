@@ -7,12 +7,13 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from layer_depth_attention.data import AssocRecallConfig, AssociativeRecallDataset
+from layer_depth_attention.experiment_logging import build_monitor
 from layer_depth_attention.model import TinyDecoderLM
 
 
@@ -39,6 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attn-residual", choices=["on", "off"], default="on")
     parser.add_argument("--ffn-residual", choices=["on", "off"], default="on")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--log-backend", choices=["none", "swanlab"], default="none")
+    parser.add_argument("--log-project", default="Layer-Depth-Attention")
+    parser.add_argument("--log-experiment-name", default=None)
     return parser.parse_args()
 
 
@@ -103,6 +107,21 @@ def main() -> None:
         attn_residual=args.attn_residual == "on",
         ffn_residual=args.ffn_residual == "on",
     ).to(device)
+    param_count = sum(param.numel() for param in model.parameters())
+    print(f"model_params={param_count}")
+
+    output_name = args.output or f"artifacts/assoc_recall_{args.attention_type}_{'attnres' if args.attn_residual == 'on' else 'noattnres'}_{'ffnres' if args.ffn_residual == 'on' else 'noffnres'}.json"
+    default_experiment_name = Path(output_name).stem
+    monitor = build_monitor(
+        backend=args.log_backend,
+        project=args.log_project,
+        experiment_name=args.log_experiment_name or default_experiment_name,
+    )
+    run_config = vars(args).copy()
+    run_config["resolved_output"] = str(ROOT / output_name)
+    run_config["model_params"] = param_count
+    monitor.init_experiment(run_config)
+    monitor.log_metrics({"model_params": param_count}, step=0)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     history = []
@@ -128,18 +147,24 @@ def main() -> None:
             metrics["step"] = step
             metrics["train_loss"] = loss.item()
             history.append(metrics)
+            monitor.log_metrics(
+                {
+                    "train_loss": metrics["train_loss"],
+                    "eval_loss": metrics["loss"],
+                    "eval_acc": metrics["accuracy"],
+                },
+                step=step,
+            )
             print(
                 f"step={step} train_loss={loss.item():.4f} "
                 f"eval_loss={metrics['loss']:.4f} eval_acc={metrics['accuracy']:.4f}"
             )
 
-    attn_tag = "attnres" if args.attn_residual == "on" else "noattnres"
-    ffn_tag = "ffnres" if args.ffn_residual == "on" else "noffnres"
-    output_name = args.output or f"artifacts/assoc_recall_{args.attention_type}_{attn_tag}_{ffn_tag}.json"
     output_path = ROOT / output_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(history, indent=2), encoding="utf-8")
     print(f"saved metrics to {output_path}")
+    monitor.finish()
 
 
 if __name__ == "__main__":

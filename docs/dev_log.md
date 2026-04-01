@@ -1149,3 +1149,467 @@
 - 影响：旧实验结果保持不变，新结构作为单独方法存在，便于后续直接做服务器实验而不污染已有结论。
 - 验证：`python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py` 通过；本地 smoke test `TinyDecoderLM(attention_type='depth_memory_value_reproj_normed_dualq_ffn_qattn_dualq')` 前向与反向通过，输出形状 `(2, 16, 128)`，参数量 `143488`。
 - 下一步：如果继续，就把这个新分支同步到服务器，在文本主配置上先跑一轮短程 probe，再决定是否拉到 `2000 step`。
+
+### [步骤 099] - 2026-04-01 00:55 CST - 新增 dual-axis 三方法数学文档
+- 请求：把 `dual_axis_memory`、`attn_residuals_dual_axis`、`dual_axis_full` 三种方法的数学实现统一写进一个 Markdown，供后续论文继续撰写。
+- 计划：新建一份独立方法文档，不覆盖已有 `method_layer_depth_memory_attention.md`，集中整理三种方法的符号约定、公式、复杂度和参数量。
+- 涉及文件：`method_dual_axis_variants.md`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增 `method_dual_axis_variants.md`，内容包括三种方法的统一符号系统、主公式、结构差异、复杂度讨论和当前主配置下的参数量。
+- 原因：后续论文写作需要一个可直接扩展的统一文档，而不是把方法定义散落在代码和实验日志里。
+- 关键信息：文档已记录当前参数量：
+  `dual_axis_memory = 18,130,688`
+  `attn_residuals_dual_axis = 18,594,560`
+  `dual_axis_full = 18,989,312`
+- 影响：后续可以直接在该文档中继续补充伪代码、图示、实验表和论文段落。
+- 验证：文档已成功写入工作树。
+- 下一步：如用户需要，可继续把当前 `WikiText-2` 与 `assoc_recall` 的实验结果补进同一份文档。
+
+### [步骤 100] - 2026-04-01 01:08 CST - 并入 dual-axis 方法并设计方案 A 实验配置
+- 请求：使用方案 A 作为 `dual_axis_full` 的正式起点，并在改代码时优先优化实现中可并行或可缓存的部分，同时确保过程材料完整保存。
+- 计划：在工作树中正式接入 `dual_axis_memory`、`attn_residuals_dual_axis`、`dual_axis_full` 三条方法线；对注意力实现做不改语义的轻量优化；在训练脚本中新增 `wt2_standard_a` preset 作为正式实验入口。
+- 涉及文件：`src/layer_depth_attention/model.py`, `train_wikitext_lm.py`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 在工作树模型实现中并入 `DualAxisMemoryAttention`、`attn_residuals_dual_axis`、`dual_axis_full`
+  2. 将 causal mask 抽成可缓存接口，避免每层每次前向重复创建
+  3. 在 block 前向中为 `DualAxisMemoryAttention` 显式传入 `past_states`
+  4. 在 `train_wikitext_lm.py` 中加入 `--model-preset wt2_standard_a`
+  5. 打开 CUDA TF32，并在训练启动时打印参数量
+- 原因：当前工作树还没有并入你后面实验中使用的 dual-axis 方法；同时，方案 A 需要一个可复用、可复现实验入口，而不是每次手工拼一长串参数。
+- 关键信息：
+  `wt2_standard_a` 当前固定为：
+  `seq_len=512`
+  `d_model=384`
+  `num_layers=6`
+  `num_heads=8`
+  `dropout=0.2`
+  `batch_size=4`
+  `grad_accum_steps=2`
+  `steps>=2000`
+  `eval_interval=400`
+  `warmup_steps=100`
+
+  按当前实现和 `tie_weights=True`，`dual_axis_full` 在该 preset 下的实际参数量是：
+  `32,956,800`
+
+  另外测得相邻两档规模为：
+  `384 x 8 -> 37,394,304`
+  `512 x 6 -> 49,906,176`
+
+  因为用户明确要求先用方案 A，所以目前 preset 仍保持 `384 x 6` 不变。
+- 影响：现在已经可以直接用统一入口跑方案 A，不需要再手动拼接实验参数；同时主模型代码和论文文档终于处于同一工作树中，后续更容易持续维护。
+- 验证：
+  `python -m py_compile src/layer_depth_attention/model.py train_wikitext_lm.py`
+  通过；
+  `dual_axis_full` 小型本地前向 smoke test 通过，输出形状 `(2, 32, 128)`；
+  方案 A 参数量核对完成。
+- 下一步：如果你确认，就直接用 `wt2_standard_a + dual_axis_full` 启动正式主实验，并把 baseline / attn_residuals 作为同配置受控对照。
+
+### [步骤 101] - 2026-04-01 01:15 CST - 准备测试更大 batch size
+- 请求：先把 `batch_size` 调到 `16`，跑一轮 `2000 step` 看看。
+- 计划：先在服务器上做一个极短的 `2 step` 显存探测，验证 `wt2_standard_a + dual_axis_full + batch_size=16` 是否能在 16GB 显存上运行；若可行，再启动 `2000 step` 正式训练。
+- 涉及文件：`dev_log.md`
+- 修改内容：记录新的实验意图与预检方案。
+- 原因：`seq_len=512`、`d_model=384`、`batch_size=16` 的显存压力明显高于当前 preset，直接长跑有较高概率 OOM。
+- 关键信息：本次先做 probe，再决定是否长跑；若显存不足，再退回更小 batch 或改用更大的 `grad_accum_steps`。
+- 影响：可以避免把大量时间浪费在必然失败的长作业上。
+- 验证：待服务器 probe 完成后补充。
+- 下一步：同步最新代码到服务器，启动 `batch_size=16` 的短程 probe。
+
+### [步骤 102] - 2026-04-01 01:38 CST - 接入 SwanLab 记录并创建全局 skill
+- 请求：创建一个全局 skill，使“记录实验”类请求默认接入 SwanLab；同时在当前项目中启用 SwanLab 记录。
+- 计划：先创建一个可复用的全局 `swanlab-experiment-logging` skill；再把项目内两个训练入口统一接到一个共享的 SwanLab 监控模块上，并保持无 SwanLab 环境时仍可正常训练。
+- 涉及文件：`src/layer_depth_attention/experiment_logging.py`, `train_wikitext_lm.py`, `train_assoc_recall.py`, `/Users/a/.codex/skills/swanlab-experiment-logging/SKILL.md`, `dev_log.md`, `memory/events.jsonl`, `memory/summaries.md`
+- 修改内容：
+  1. 新增共享模块 `experiment_logging.py`，提供 `SwanLabMonitor`、`NullMonitor` 和 `build_monitor`
+  2. 在 `train_wikitext_lm.py` 中加入 `--log-backend`、`--log-project`、`--log-experiment-name`
+  3. 在 `train_assoc_recall.py` 中加入同一套日志参数
+  4. 两个训练脚本都会自动记录 `model_params`、阶段性训练/验证指标和最终测试指标
+  5. 在 `~/.codex/skills` 下新增 `swanlab-experiment-logging` 全局 skill
+- 原因：你希望以后提到“记录实验”时就默认走 SwanLab，而不是每个项目都重新手写一次日志接入。
+- 关键信息：
+  - 这次接入是可选后端，不会强制依赖 `swanlab`
+  - 如果环境里没有安装 SwanLab，或 `swanlab.login()` 失败，训练会自动退化成 no-op，不影响原有 JSON artifact 输出
+  - 默认实验名会复用输出文件名的 stem，便于把本地 artifact 和 SwanLab run 对齐
+- 影响：后续所有训练脚本都可以用统一方式开关实验记录，且不会把密钥写进仓库或日志。
+- 验证：`python -m py_compile src/layer_depth_attention/experiment_logging.py train_wikitext_lm.py train_assoc_recall.py` 通过。
+- 下一步：如需在服务器上实际记录，只要同步代码后使用 `--log-backend swanlab` 启动训练即可。
+
+### [步骤 103] - 2026-04-01 01:41 CST - 完成服务器 SwanLab 可用性验证
+- 请求：确保当前项目在服务器上也能实际使用 SwanLab 记录，而不只是本地代码接入完成。
+- 计划：先把新增文件同步到服务器；确认远端 `pt-3.9` 环境安装了 `swanlab`；再跑一个极小的 smoke run 验证训练脚本 + SwanLab 的联动不会卡死。
+- 涉及文件：`src/layer_depth_attention/experiment_logging.py`, `train_wikitext_lm.py`, `train_assoc_recall.py`, `dev_log.md`, `memory/events.jsonl`, `memory/summaries.md`
+- 修改内容：
+  1. 将三处改动同步到服务器项目 `D:\Projects\Layer-Depth-Attention`
+  2. 远端执行 `python -m py_compile ...`，确认同步后的脚本能正常编译
+  3. 用 `python -m pip show swanlab` 确认服务器环境已安装 `swanlab`
+  4. 运行 `assoc_recall` 的 1-step `--log-backend swanlab` smoke run
+- 原因：如果远端缺包或登录流程异常，后续正式训练可能在开跑前就挂住。
+- 关键信息：
+  - 远端 `swanlab` 已安装
+  - 1-step smoke run 已成功结束，并写出 `D:\Projects\Layer-Depth-Attention\artifacts\assoc_recall_swanlab_smoke.json`
+  - 输出包含：
+    `model_params=803456`
+    `step=1 train_loss=89.1296 eval_loss=89.1759 eval_acc=0.0000`
+- 影响：当前项目已经具备“本地代码可选接入 + 服务器真实可运行”的完整 SwanLab 记录链路。
+- 验证：远端编译通过；远端 smoke run 成功退出并写出 artifact。
+- 下一步：后续正式实验可直接在命令中加入 `--log-backend swanlab --log-project Layer-Depth-Attention`。
+
+### [步骤 104] - 2026-04-01 01:43 CST - 启动 dual_axis_full 方案 A 正式训练并接入 SwanLab
+- 请求：直接开跑 `wt2_standard_a + dual_axis_full + batch_size=16 + steps=2000`，并使用 SwanLab 记录。
+- 计划：复用刚完成验证的服务器 SwanLab 链路，在远端 `pt-3.9` 环境中启动正式训练；同时记录命令、输出路径和进程状态，便于后续轮询。
+- 涉及文件：`scripts/launch_wt2a_dual_axis_full_bs16_s2000.bat`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 新增启动脚本 `scripts/launch_wt2a_dual_axis_full_bs16_s2000.bat`
+  2. 将脚本同步到服务器，便于后续复用和复现实验命令
+  3. 当前正式训练已通过远端交互会话启动
+- 原因：Windows 下后台命令转义不稳定，使用独立 `.bat` 脚本更容易复现，也便于后续直接重跑。
+- 关键信息：
+  - 训练配置：
+    `--device cuda`
+    `--model-preset wt2_standard_a`
+    `--attention-type dual_axis_full`
+    `--steps 2000`
+    `--batch-size 16`
+    `--log-backend swanlab`
+    `--log-project Layer-Depth-Attention`
+    `--log-experiment-name dual_axis_full_wt2a_bs16_s2000`
+    `--output artifacts\\wikitext2_dual_axis_full_wt2a_bs16_s2000.json`
+  - 服务器当前训练进程：
+    `python.exe PID=34560`
+  - 目前 JSON 尚未写出，说明训练仍处于首轮运行中，尚未到保存节点
+- 影响：方案 A 的正式长作业已进入执行态，后续可以直接轮询验证集打印和最终 artifact。
+- 验证：服务器 `tasklist` 已看到 `python.exe 34560`；训练会话仍在运行。
+- 下一步：继续轮询会话输出，优先确认是否已打印 `model_params` 和首个 `step=1`。
+
+### [步骤 105] - 2026-04-01 01:52 CST - 定位 SwanLab 无消息的根因
+- 请求：训练已开始，但 SwanLab 面板没有新消息，需要定位原因并修复。
+- 计划：先把 `experiment_logging.py` 的异常从静默吞掉改成直接打印；然后重启当前训练，观察 `login/init` 的真实错误。
+- 涉及文件：`src/layer_depth_attention/experiment_logging.py`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 在 `SwanLabMonitor` 中为 `login/init/log/finish` 增加标准错误打印
+  2. 编译并同步新模块到服务器
+  3. 终止旧训练进程 `PID=34560`，清理旧 JSON/LOG 后重启训练
+- 原因：之前的包装器把异常静默吞掉，导致训练继续运行但用户无法知道 SwanLab 为什么没有显示。
+- 关键信息：
+  - 重启后已打印出真实错误：
+    `[swanlab] login failed: SSLError(MaxRetryError(... api.swanlab.cn ... TLS/SSL connection has been closed ...))`
+  - 随后打印：
+    `[swanlab] init skipped: monitor disabled`
+  - 说明根因是服务器与 `api.swanlab.cn:443` 的 TLS/SSL 握手失败，而不是项目名、实验名或本地脚本逻辑有问题
+- 影响：当前服务器环境下，这条训练不会向 SwanLab 上报；训练本身仍会继续，JSON artifact 仍会正常保存。
+- 验证：重启后的训练会话已输出上述错误信息。
+- 下一步：如果需要 SwanLab 面板同步，必须先解决服务器到 SwanLab API 的网络/证书问题，或改为在本机/可联网节点运行训练上报。
+
+### [步骤 106] - 2026-04-01 01:55 CST - 缩小到 Windows 证书吊销检查问题
+- 请求：进一步确认是否是 API 地址错误，还是服务器 HTTPS 环境问题。
+- 计划：分别检查 DNS、ICMP、WinHTTP 代理和 `curl` 的 HTTPS 直连结果，判断问题发生在哪一层。
+- 涉及文件：`dev_log.md`, `memory/events.jsonl`
+- 修改内容：补充了一轮远端网络诊断，不改代码。
+- 原因：需要把“API 写错”和“服务器 TLS/证书问题”明确区分开。
+- 关键信息：
+  - `nslookup api.swanlab.cn` 正常
+  - `ping api.swanlab.cn` 正常，0% 丢包
+  - `netsh winhttp show proxy` 显示无代理
+  - `curl -I https://api.swanlab.cn` 与 `curl -I https://swanlab.cn` 都失败，错误为：
+    `CRYPT_E_REVOCATION_OFFLINE (0x80092013)`
+  - 这说明问题不是 API 地址错误，而是 Windows TLS 证书链在做吊销检查时拿不到上游验证结果
+- 影响：只要这台服务器的证书/网络环境不修，SwanLab 和其他依赖同类 HTTPS 校验的服务都可能出现类似问题。
+- 验证：服务器网络诊断命令均已执行并返回结果。
+- 下一步：优先考虑修服务器证书吊销检查环境，或改到本机/其他可联网节点执行需要外网 HTTPS 的上报任务。
+
+### [步骤 107] - 2026-04-01 02:00 CST - 关掉 VPN 后恢复 SwanLab 上报
+- 请求：用户关闭 VPN 后，要求再次测试 SwanLab 连通性并尽快恢复实验上报。
+- 计划：先重新跑 HTTPS 探测；若恢复，则终止当前已被禁用监控器的训练进程并重新启动同配置 run。
+- 涉及文件：`dev_log.md`, `memory/events.jsonl`
+- 修改内容：未改代码；重启了服务器上的正式训练进程。
+- 原因：之前启动的那条训练已经在 `login failed` 后把监控器禁用，即便网络恢复也不会自动重新上报。
+- 关键信息：
+  - `curl -I https://api.swanlab.cn` 现已返回 `HTTP/1.1 404`
+  - `curl -I https://swanlab.cn` 现已返回 `HTTP/1.1 200`
+  - 说明关掉 VPN 后 HTTPS 已恢复
+  - 重启训练后，终端打印：
+    `[swanlab] login succeeded`
+    `swanlab: Syncing run dual_axis_full_wt2a_bs16_s2000 to the cloud`
+  - 当前 SwanLab 运行链接：
+    `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/n4qet2eech5hu1pgixe0h`
+- 影响：当前正式实验已经恢复云端同步，后续指标会在 SwanLab 面板中实时出现。
+- 验证：重启后的训练会话已打印 SwanLab 登录成功、本地 `swanlog` 路径和云端运行链接。
+- 下一步：继续轮询训练过程中的 `step=1` 与后续验证指标。
+
+### [步骤 108] - 2026-04-01 02:13 CST - 记录 s2000 结果并发现 preset 覆盖 batch size
+- 请求：用户确认训练结束，要求先把结果记录下来，再启动更长的 `30000 step` 训练。
+- 计划：先读取 `wikitext2_dual_axis_full_wt2a_bs16_s2000.json` 的完整结果；确认实际运行配置；然后以纠正后的真实配置启动长训练。
+- 涉及文件：`dev_log.md`, `memory/events.jsonl`
+- 修改内容：记录本次 `s2000` 实验结果，并标注配置覆盖问题。
+- 原因：实验命名写了 `bs16`，但需要先核对 artifact 里的实际配置，避免后续长训练建立在错误认知上。
+- 关键信息：
+  - 本次最终结果：
+    `val_loss=4.0211`
+    `val_ppl=55.76`
+    `test_loss=4.2460`
+    `test_ppl=69.83`
+  - 关键中间点：
+    `step 400 val_loss=7.8924`
+    `step 800 val_loss=4.9741`
+    `step 1200 val_loss=4.3015`
+    `step 1600 val_loss=4.0992`
+    `step 2000 val_loss=4.0211`
+  - 但 artifact 中实际配置显示：
+    `batch_size=4`
+    `grad_accum_steps=2`
+  - 这说明 `wt2_standard_a` preset 把命令行里的 `--batch-size 16` 覆盖掉了，因此这条 run 名称里的 `bs16` 与真实运行配置不一致
+- 影响：后续长训练不能继续沿用这种带 preset 覆盖的启动方式，否则仍然不是真正的 `batch_size=16`。
+- 验证：已读取服务器 artifact `D:\Projects\Layer-Depth-Attention\artifacts\wikitext2_dual_axis_full_wt2a_bs16_s2000.json`。
+- 下一步：不用 preset 覆盖式启动，而是显式传入方案 A 的各项参数，启动真实的 `batch_size=16, steps=30000` 训练。
+
+### [步骤 109] - 2026-04-01 02:15 CST - 改为 batch_size=6 并启动 30000 step 长训练
+- 请求：用户担心 `batch_size=16` 会爆显存，要求把长训练改成 `batch_size=6`。
+- 计划：先确认服务器上没有误启动的旧长作业；然后把启动脚本改成显式参数的 `batch_size=6` 版本，并直接启动带 SwanLab 的 `30000 step` 长训练。
+- 涉及文件：`scripts/launch_dual_axis_full_true_bs6_s30000.bat`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 删除原本计划中的 `bs16` 长训练脚本
+  2. 新增 `launch_dual_axis_full_true_bs6_s30000.bat`
+  3. 同步脚本到服务器并启动正式长训练
+- 原因：既要避免 `wt2_standard_a` preset 再次覆盖 `batch_size`，也要降低长作业的显存风险。
+- 关键信息：
+  - 当前长训练使用的是**显式参数**而不是 preset 覆盖：
+    `seq_len=512`
+    `d_model=384`
+    `num_layers=6`
+    `num_heads=8`
+    `dropout=0.2`
+    `batch_size=6`
+    `grad_accum_steps=2`
+    `steps=30000`
+    `attention_type=dual_axis_full`
+  - SwanLab 已成功连接，当前运行链接：
+    `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/kqqu71nuuiy6usrvvs740`
+  - 本地 `swanlog` 路径：
+    `D:\Projects\Layer-Depth-Attention\swanlog\run-20260401_021522-kqqu71nuuiy6usrvvs740`
+- 影响：现在这条长训练终于对应真实的 `batch_size=6` 配置，后续结果可以直接用于继续判断长程收敛趋势。
+- 验证：训练会话已打印 `model_params=32956800`、`[swanlab] login succeeded` 和 `init succeeded`。
+- 下一步：继续轮询 `step=1` 和后续 `eval_interval=400` 的验证指标。
+
+### [步骤 110] - 2026-04-01 02:27 CST - 终止 bs6 并切换到 bs8 长训练
+- 请求：用户要求终止当前长训练，并把 `batch_size` 从 `6` 改为 `8`。
+- 计划：先停止服务器上的 `bs6` 进程，避免占卡；再将长训练脚本改为 `bs8` 版本、同步到服务器，并重新启动同配置 `30000 step` 实验。
+- 涉及文件：`scripts/launch_dual_axis_full_true_bs8_s30000.bat`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 终止旧进程 `PID=34944`
+  2. 删除 `bs6` 脚本，改为 `launch_dual_axis_full_true_bs8_s30000.bat`
+  3. 同步新脚本到服务器并启动新 run
+- 原因：用户希望在显存允许范围内尽量提高有效 batch size，因此从 `6` 调到 `8`。
+- 关键信息：
+  - 当前新 run 使用真实配置：
+    `batch_size=8`
+    `grad_accum_steps=2`
+    `steps=30000`
+    其余方案 A 主配置保持不变
+  - 当前 SwanLab 运行链接：
+    `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/e91pplrhtif0uh9g5q23x`
+  - 终端已打印：
+    `[swanlab] login succeeded`
+    `init succeeded`
+- 影响：当前有效长训练主线已经从 `bs6` 切换为 `bs8`，后续结果应只继续跟踪这条新 run。
+- 验证：训练会话已打印 `model_params=32956800`、SwanLab 本地保存路径和云端 run 链接。
+- 下一步：继续等待 `step=1` 与后续评估节点输出。
+
+### [步骤 111] - 2026-04-01 06:24 CST - 启动论文主稿第一版
+- 请求：开始论文写作。
+- 计划：先重读 `dev_log.md`、`memory/summaries.md`、方法说明和实验记录，确定当前最可信的论文叙事，再落一份可继续扩写的主稿初版。
+- 涉及文件：`paper_draft.md`, `dev_log.md`, `memory/events.jsonl`, `memory/summaries.md`
+- 修改内容：新增 `paper_draft.md`，写入题目、摘要、引言、方法、实验设置、结果分析、讨论、结论和后续补写清单。
+- 原因：当前仓库已经积累了足够多的方法说明和实验结果，继续零散记笔记效率较低，需要尽快收敛成论文主稿骨架。
+- 关键信息：
+  - 主稿叙事明确采用“先提出 Layer-Depth Memory Attention，再说明 projection alignment 是关键”的结构。
+  - 文本结果会诚实表述：`value_reproj_normed` 是当前非 residual 路线中最稳定的版本，但整体最强对照仍然是 `Attention Residuals`。
+  - `dual_axis_*` 系列暂不并入主结论，只保留为后续扩展方向，避免当前论文主线被未完成长训结果牵动。
+- 影响：后续可以直接在 `paper_draft.md` 上继续补 Related Work、正式公式、表格与图，不需要再从零整理主线。
+- 验证：已完成现有文档与实验记录对齐；代码测试不适用。
+- 下一步：根据用户偏好继续补写引言细化版、Related Work 或 LaTeX/中文论文格式化版本。
+
+### [步骤 112] - 2026-04-01 06:30 CST - 补齐严格可比的 baseline 长训练脚本
+- 请求：用户需要一个可以直接对比当前 `dual_axis_full_true_bs8_s30000` 的 baseline 版本。
+- 计划：新增一份严格对齐的 baseline 启动脚本，保证除 `attention_type` 外其余超参数、训练预算、日志方式全部一致。
+- 涉及文件：`scripts/launch_baseline_true_bs8_s30000.bat`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增 `launch_baseline_true_bs8_s30000.bat`，其配置与 `launch_dual_axis_full_true_bs8_s30000.bat` 完全一致，仅将 `attention_type` 改为 `baseline`，并设置独立的 SwanLab run 名称和输出文件。
+- 原因：只有这样才能做严格受控对比，避免把结构差异和训练预算差异混在一起。
+- 关键信息：
+  - 可比 baseline 真实配置：
+    `seq_len=512`
+    `d_model=384`
+    `num_layers=6`
+    `num_heads=8`
+    `dropout=0.2`
+    `batch_size=8`
+    `grad_accum_steps=2`
+    `steps=30000`
+    `attention_type=baseline`
+  - 输出文件：
+    `artifacts\\wikitext2_baseline_true_bs8_s30000.json`
+  - SwanLab 实验名：
+    `baseline_true_bs8_s30000`
+- 影响：现在已经有了一条可以和当前 dual-axis 主实验逐项对齐的 baseline 训练入口，后续只需要决定何时启动即可。
+- 验证：脚本已写入工作树；尚未启动服务器训练。
+- 下一步：若用户确认，就直接同步到服务器并启动 baseline 长训练。
+
+### [步骤 113] - 2026-04-01 08:19 CST - 为 WikiText 训练补上 best checkpoint 保存
+- 请求：用户指出当前代码没有保存“验证集最优权重”，要求补一个。
+- 计划：在 `train_wikitext_lm.py` 中加入标准 checkpoint 机制，按 `val_loss` 最优保存 `best` 权重，同时保存 `latest`，并在训练结束后自动加载 `best` 权重跑 test。
+- 涉及文件：`train_wikitext_lm.py`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 新增 `checkpoints/` 输出目录
+  2. 每次评估时保存 `*_latest.pt`
+  3. 若当前 `val_loss` 刷新最佳，则保存 `*_best.pt`
+  4. 训练结束后自动加载 best 权重并计算 `best_test_loss / best_test_ppl`
+  5. 在最终 JSON 中新增：
+     `best_step`
+     `best_val_loss`
+     `best_val_ppl`
+     `best_test_loss`
+     `best_test_ppl`
+     `best_checkpoint_path`
+     `latest_checkpoint_path`
+- 原因：当前语言模型任务没有“验证准确率”这个主指标，正式实验应按 `val_loss` 选 best checkpoint，而不是手工回看日志挑点。
+- 关键信息：
+  - 保存 best 的准则是 **`val_loss` 最小**
+  - 不是 `accuracy`
+  - 当前已经在跑的长训练不会自动获得这个功能，必须重启后才会生效
+- 影响：后续长训练终于可以标准化地报告“best checkpoint 对应的 test 结果”，实验口径会更规范。
+- 验证：`python -m py_compile train_wikitext_lm.py` 通过。
+- 下一步：如需让当前服务器长训练也具备 best 保存功能，需要同步脚本并重启该 run。
+
+### [步骤 114] - 2026-04-01 08:26 CST - 启动严格可比的 baseline 长训练
+- 请求：用户要求现在开始跑 baseline，对比当前 `dual_axis_full_true_bs8_s30000`。
+- 计划：将 baseline 启动脚本和带 best/latest checkpoint 的新版 `train_wikitext_lm.py` 同步到服务器，然后启动 `baseline_true_bs8_s30000`。
+- 涉及文件：`scripts/launch_baseline_true_bs8_s30000.bat`, `train_wikitext_lm.py`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：
+  1. 同步 `launch_baseline_true_bs8_s30000.bat` 到服务器
+  2. 同步新版 `train_wikitext_lm.py` 到服务器
+  3. 启动 baseline 长训练
+- 原因：需要一个和 `dual_axis_full_true_bs8_s30000` 仅在 `attention_type` 上不同的严格可比 baseline。
+- 关键信息：
+  - baseline 参数量：
+    `30,142,848`
+  - 当前 SwanLab 运行链接：
+    `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/gqpc63mk1rpeaq74cwq05`
+  - 终端已打印：
+    `model_params=30142848`
+    `[swanlab] init succeeded: project=Layer-Depth-Attention experiment=baseline_true_bs8_s30000`
+- 影响：从这一刻开始，项目里已经有了一条真正和 `dual_axis_full_true_bs8_s30000` 对齐的 baseline 主实验线。
+- 验证：服务器训练会话已启动并成功接入 SwanLab。
+- 下一步：继续等待 baseline 的 `step=1` 与后续验证结果，用于和 dual-axis 曲线做正式对比。
+
+### [步骤 115] - 2026-04-01 08:31 CST - 补齐严格可比的 attn_residuals 长训练脚本
+- 请求：用户要求把 `Attention Residuals` 版本也写出来，作为和 baseline / dual_axis_full 并列的主对照。
+- 计划：复用 baseline 长训练脚本模板，仅把 `attention_type` 改为 `attn_residuals`，其余超参数、训练预算和日志方式保持完全一致。
+- 涉及文件：`scripts/launch_attn_residuals_true_bs8_s30000.bat`, `dev_log.md`, `memory/events.jsonl`
+- 修改内容：新增 `launch_attn_residuals_true_bs8_s30000.bat`，用于启动严格可比的 `attn_residuals` 长训练。
+- 原因：当前主实验叙事需要三条严格对齐的主线：
+  `baseline`
+  `attn_residuals`
+  `dual_axis_full`
+- 关键信息：
+  - `attn_residuals` 长训练配置与当前 baseline / dual-axis 主实验完全一致：
+    `seq_len=512`
+    `d_model=384`
+    `num_layers=6`
+    `num_heads=8`
+    `dropout=0.2`
+    `batch_size=8`
+    `grad_accum_steps=2`
+    `steps=30000`
+  - 输出文件：
+    `artifacts\\wikitext2_attn_residuals_true_bs8_s30000.json`
+  - SwanLab 实验名：
+    `attn_residuals_true_bs8_s30000`
+- 影响：现在项目里三条主实验都已经有对应的标准化启动入口，可以按串行顺序跑完整对照。
+- 验证：脚本已写入工作树；尚未启动服务器训练。
+- 下一步：待当前 baseline 跑完后，可直接启动 `attn_residuals_true_bs8_s30000`。
+
+### [步骤 116] - 2026-04-01 08:36 CST - 补齐三条 20000 step 变体脚本和串行循环脚本
+- 请求：用户澄清需要的不是 `baseline`，而是三条方法：
+  `attn_residuals`
+  `attn_residuals_dual_axis`
+  `dual_axis_memory`
+  并要求每条先跑 `20000 step`。
+- 计划：分别为这三条方法新增 `bs8 + s20000` 的标准化启动脚本，再新增一个串行循环脚本，按固定顺序自动跑完三条。
+- 涉及文件：
+  `scripts/launch_attn_residuals_true_bs8_s20000.bat`
+  `scripts/launch_attn_residuals_dual_axis_true_bs8_s20000.bat`
+  `scripts/launch_dual_axis_memory_true_bs8_s20000.bat`
+  `scripts/run_residual_and_attention_variants_bs8_s20000.bat`
+  `dev_log.md`
+  `memory/events.jsonl`
+- 修改内容：
+  1. 新增 `attn_residuals_true_bs8_s20000` 启动脚本
+  2. 新增 `attn_residuals_dual_axis_true_bs8_s20000` 启动脚本
+  3. 新增 `dual_axis_memory_true_bs8_s20000` 启动脚本
+  4. 新增串行循环脚本 `run_residual_and_attention_variants_bs8_s20000.bat`
+- 原因：这三条才是用户当前真正想并排比较的路线；提前写成统一入口，后续可以直接排队串行执行。
+- 关键信息：
+  - 三条脚本共享同一套配置：
+    `seq_len=512`
+    `d_model=384`
+    `num_layers=6`
+    `num_heads=8`
+    `dropout=0.2`
+    `batch_size=8`
+    `grad_accum_steps=2`
+    `steps=20000`
+    `eval_interval=400`
+  - 循环脚本执行顺序：
+    `attn_residuals -> attn_residuals_dual_axis -> dual_axis_memory`
+- 影响：现在除了已经在跑的主线外，这三条对照方法也已经具备统一、可直接串行调度的标准化入口。
+- 验证：脚本已写入工作树；尚未同步到服务器。
+- 下一步：如用户确认，就把这四个脚本同步到服务器，并在当前任务空闲后直接运行循环脚本。
+
+### [步骤 117] - 2026-04-01 10:00 CST - 打断旧任务并启动三方法串行队列
+- 请求：用户要求打断前面的任务，直接顺序跑三条 `20000 step` 方法：
+  `attn_residuals`
+  `attn_residuals_dual_axis`
+  `dual_axis_memory`
+- 计划：先终止服务器上当前的 Python 训练进程；再同步三条启动脚本与循环脚本到服务器；最后直接运行串行队列。
+- 涉及文件：
+  `scripts/launch_attn_residuals_true_bs8_s20000.bat`
+  `scripts/launch_attn_residuals_dual_axis_true_bs8_s20000.bat`
+  `scripts/launch_dual_axis_memory_true_bs8_s20000.bat`
+  `scripts/run_residual_and_attention_variants_bs8_s20000.bat`
+  `dev_log.md`
+  `memory/events.jsonl`
+- 修改内容：
+  1. 终止服务器上的旧 Python 训练进程 `PID=12228`
+  2. 将四个脚本同步到服务器项目根目录
+  3. 启动 `run_residual_and_attention_variants_bs8_s20000.bat`
+- 原因：用户已经明确当前要优先跑这三条队列，不再继续之前的 baseline 主线。
+- 关键信息：
+  - 当前队列已启动，执行顺序为：
+    `attn_residuals_true_bs8_s20000`
+    `attn_residuals_dual_axis_true_bs8_s20000`
+    `dual_axis_memory_true_bs8_s20000`
+  - 当前第一条已开始训练并接入 SwanLab：
+    `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/g36jjy0ykotarx16zcopm`
+  - 当前第一条方法的参数量打印为：
+    `30,147,840`
+- 影响：服务器现在已经切换到新的三方法串行实验队列，后续会自动按顺序连续执行。
+- 验证：队列会话已打印 `[queue] start attn_residuals_true_bs8_s20000`、`model_params=30147840` 和 SwanLab 云端链接。
+- 下一步：继续轮询当前第一条方法的 `step=1` 及后续验证点，待其结束后确认队列自动切换到第二条。
+
+### [步骤 118] - 2026-04-01 16:29 CST - 继续跑剩余两条变体
+- 请求：用户要求不要停在第一条，继续把剩下的实验跑完。
+- 计划：确认第二条和第三条 artifact 仍未生成后，新增一个“从第二条继续”的串行脚本，按顺序跑：
+  `attn_residuals_dual_axis`
+  `dual_axis_memory`
+- 涉及文件：
+  `scripts/run_remaining_variants_bs8_s20000.bat`
+  `dev_log.md`
+  `memory/events.jsonl`
+- 修改内容：新增 `run_remaining_variants_bs8_s20000.bat`，避免依赖已经在第一条后退出的旧队列脚本。
+- 原因：原始三方法队列只完成了第一条，第二条和第三条都还没产生 artifact，用户明确要求继续跑完。
+- 关键信息：
+  - 当前确认：
+    `wikitext2_attn_residuals_dual_axis_true_bs8_s20000.json` 尚不存在
+    `wikitext2_dual_axis_memory_true_bs8_s20000.json` 尚不存在
+- 影响：现在已经有了一个干净的“剩余两条”串行入口，可以直接从第二条继续。
+- 验证：脚本已写入工作树；尚未同步到服务器。
+- 下一步：同步 `run_remaining_variants_bs8_s20000.bat` 到服务器并启动。
