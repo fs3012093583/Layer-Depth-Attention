@@ -1,5 +1,17 @@
 # Memory Summaries
 
+## 2026-04-02 02:34 CST - 恢复 GitHub 直连同步
+- Scope:
+  停用 ZeroTier 本地裸仓库同步链路，恢复本项目以 GitHub `origin` 为唯一代码同步来源。
+- Change:
+  为当前工作树补回根目录 `dev_log.md`，提交缺失的架构文档，先在 GitHub 上备份旧 `main/develop` 分支，再把本地 `main` 强制更新到远端；随后在服务器上备份脏工作区并切到新的 `origin/main`，同时移除 `zerotier-local`。
+- Why it matters:
+  后续代码同步重新回到普通 `git push` / `git pull`，不再依赖本机开 `git daemon` 或 ZeroTier 路由。
+- Open items:
+  服务器上保留了 `backup/server-pre-github-resync-20260402` 分支和 `pre-github-resync-20260402` stash，只有在确认完全不需要回看旧现场时才考虑清理。
+- Re-read if:
+  之后再出现“服务器代码和本地不一致”、需要找回同步前现场，或需要解释为什么 GitHub `main` 在 2026-04-02 被 force update 时。
+
 ## 2026-03-31 12:18 CST - 双 q 同时进入 attention 与 FFN
 - Scope:
   文本主线新增一个显式新分支，把同行 `q_row` / 同列 `q_col` 的拆分同时应用到 attention 子层和 FFN 替代子层。
