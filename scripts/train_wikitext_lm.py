@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -229,6 +230,7 @@ def main() -> None:
     history = []
     best_record = None
     best_model_state = None
+    train_start = time.perf_counter()
 
     for step in range(1, args.steps + 1):
         lr = cosine_lr(step, args.steps, args.lr, args.warmup_steps, args.min_lr_scale)
@@ -251,12 +253,15 @@ def main() -> None:
 
         if step % args.eval_interval == 0 or step == 1 or step == args.steps:
             val_metrics = evaluate(model, data, "validation", args.batch_size, args.eval_batches, device)
+            elapsed_seconds = time.perf_counter() - train_start
             record = {
                 "step": step,
                 "lr": lr,
                 "train_loss": running_loss / args.grad_accum_steps,
                 "val_loss": val_metrics["loss"],
                 "val_ppl": val_metrics["perplexity"],
+                "elapsed_seconds": elapsed_seconds,
+                "elapsed_minutes": elapsed_seconds / 60.0,
             }
             history.append(record)
             latest_payload = {
@@ -284,7 +289,8 @@ def main() -> None:
             monitor.log_metrics(record, step=step)
             print(
                 f"step={step} lr={lr:.6f} train_loss={record['train_loss']:.4f} "
-                f"val_loss={record['val_loss']:.4f} val_ppl={record['val_ppl']:.2f}"
+                f"val_loss={record['val_loss']:.4f} val_ppl={record['val_ppl']:.2f} "
+                f"elapsed_min={record['elapsed_minutes']:.2f}"
             )
 
     if best_model_state is not None:

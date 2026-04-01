@@ -772,7 +772,9 @@ class TinyDecoderLM(nn.Module):
         values = [embedding] + history
         stacked = torch.stack(values, dim=2)
         normed = self._rms_norm_tensor(stacked)
-        scores = torch.einsum("btsd,d->bts", normed, query)
+        # Scale the depth scores like standard dot-product attention so deeper/wider
+        # models do not make the residual router overly sharp too early.
+        scores = torch.einsum("btsd,d->bts", normed, query) / math.sqrt(stacked.size(-1))
         weights = torch.softmax(scores, dim=2)
         return torch.einsum("bts,btsd->btd", weights, stacked)
 

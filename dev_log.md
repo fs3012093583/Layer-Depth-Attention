@@ -30,3 +30,28 @@
 - Side effects: GitHub `main` was force-updated from `8cc6719` to `fa16438`; the server now tracks `origin/main` cleanly.
 - Verification: Local `git push --force-with-lease origin main:main` succeeded; server `git checkout -B main origin/main` succeeded; server `git remote -v` now lists only GitHub `origin`; server `git status --short --branch` is clean.
 - Next step: Push this final memory update if the repo should remain fully self-documented after the sync task.
+
+### [Step 003] - 2026-04-02 17:35 CST - Audit Dual-Axis Full blueprint against current code
+- Request: Verify whether `docs/dual_axis_full_architecture.md` is strictly identical to the current `dual_axis_full` training implementation, then assess the document's listed issues/suggestions and surface any additional problems.
+- Plan: Locate the real `dual_axis_full` training entrypoints, inspect `train_wikitext_lm.py` and `src/layer_depth_attention/model.py`, and compare the blueprint line by line against the live code path instead of against older experiment branches.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Recorded the comparison baseline after reading the blueprint, the model implementation, and the active launch scripts.
+- Rationale: The repository contains many historical attention variants; without isolating the actual `dual_axis_full` code path, any architecture review would mix incompatible implementations.
+- Key details: Confirmed that `scripts/train_wikitext_lm.py --attention-type dual_axis_full` is the active entrypoint, and that `TinyDecoderLM(attention_type='dual_axis_full')` routes to `DualAxisMemoryAttention` plus `_attn_res_dual_axis_mix`.
+- Side effects: None yet; this is an analysis-only checkpoint.
+- Verification: Read `docs/dual_axis_full_architecture.md`, `src/layer_depth_attention/model.py`, `scripts/train_wikitext_lm.py`, `scripts/launch_dual_axis_full_true_bs8_s30000.bat`, and `scripts/launch_wt2a_dual_axis_full_bs16_s2000.bat`.
+- Next step: Emit the strict consistency verdict, document concrete mismatches, and recommend the highest-value architecture/training fixes.
+
+### [Step 004] - 2026-04-02 17:50 CST - Add depth-score scaling and richer dual-axis-full logging
+- Request: First fix only the missing `_attn_res_mix()` scale factor, then rerun a `dual_axis_full` control. The user additionally asked to record elapsed time at each evaluation point, increase evaluation sample size, and use `20000` steps for this run.
+- Plan: Keep the architectural change minimal by only adding `1/sqrt(D)` in `_attn_res_mix()`, then update the language-model training script to record elapsed time per eval point and create a dedicated `20000`-step launch script with larger `eval_batches`.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext_lm.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_dual_axis_full_true_bs8_s20000_eval100.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Added `1 / sqrt(D)` scaling to `_attn_res_mix()` depth scores.
+  - Added `elapsed_seconds` and `elapsed_minutes` to each eval record in `train_wikitext_lm.py`, and printed elapsed minutes in the console log.
+  - Added a dedicated launch script for `dual_axis_full_true_bs8_s20000_eval100`.
+- Rationale: The scaling bug is the highest-priority algorithmic issue currently identified; richer timing and larger eval slices reduce interpretability problems and variance without changing the model definition.
+- Key details: The new run script keeps the previous `dual_axis_full` architecture and optimization hyperparameters, but changes `steps=20000` and `eval_batches=100`.
+- Side effects: Existing older launch scripts remain unchanged; this avoids rewriting prior experiment baselines.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py scripts/train_wikitext_lm.py` passed; local `TinyDecoderLM(attention_type='dual_axis_full')` forward/backward smoke test passed with output shape `(2, 32, 128)`.
+- Next step: Sync the code to the server and start the new `dual_axis_full_true_bs8_s20000_eval100` run.
