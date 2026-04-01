@@ -1,5 +1,17 @@
 # Memory Summaries
 
+## 2026-04-02 02:34 CST - 恢复 GitHub 直连同步
+- Scope:
+  停用 ZeroTier 本地裸仓库同步链路，恢复本项目以 GitHub `origin` 为唯一代码同步来源。
+- Change:
+  为当前工作树补回根目录 `dev_log.md`，提交缺失的架构文档，先在 GitHub 上备份旧 `main/develop` 分支，再把本地 `main` 强制更新到远端；随后在服务器上备份脏工作区并切到新的 `origin/main`，同时移除 `zerotier-local`。
+- Why it matters:
+  后续代码同步重新回到普通 `git push` / `git pull`，不再依赖本机开 `git daemon` 或 ZeroTier 路由。
+- Open items:
+  服务器上保留了 `backup/server-pre-github-resync-20260402` 分支和 `pre-github-resync-20260402` stash，只有在确认完全不需要回看旧现场时才考虑清理。
+- Re-read if:
+  之后再出现“服务器代码和本地不一致”、需要找回同步前现场，或需要解释为什么 GitHub `main` 在 2026-04-02 被 force update 时。
+
 ## 2026-03-31 12:18 CST - 双 q 同时进入 attention 与 FFN
 - Scope:
   文本主线新增一个显式新分支，把同行 `q_row` / 同列 `q_col` 的拆分同时应用到 attention 子层和 FFN 替代子层。
@@ -12,26 +24,26 @@
 - Re-read if:
   后续继续比较 `dualq` 在 attention/FFN 不同插入位置的效果时。
 
-## 2026-03-31 13:08 CST - 论文实验从零散跑数转向标准矩阵
+## 2026-04-01 01:38 CST - SwanLab 记录统一接入
 - Scope:
-  把当前工作重构成毕业论文导向的实验设计，而不是继续追加零散单次实验。
+  为当前项目的训练脚本增加统一的可选 SwanLab 实验记录能力，并创建一个未来可复用的全局 skill。
 - Change:
-  激活 layered memory，补齐 `memory/events.jsonl`，并把当前任务收束为“标准基线 + 你的方法 + 必要消融 + 分阶段执行顺序”的实验矩阵设计。
+  新增共享模块 `experiment_logging.py`；`train_wikitext_lm.py` 和 `train_assoc_recall.py` 增加 `--log-backend/--log-project/--log-experiment-name`；在 `~/.codex/skills` 新建 `swanlab-experiment-logging`。
 - Why it matters:
-  现有仓库已经有可跑的文本与合成任务入口，主要瓶颈变成实验组织是否能支撑论文论证。
+  后续做实验时不需要反复手写监控逻辑，也不会因为缺少 SwanLab 环境而影响训练本身。
 - Open items:
-  需要明确用户口述中的“稳定注意力/长上下文注意力”各自对应哪类具体基线，并决定主表只放哪些方法。
+  目前只完成了 1-step smoke run；正式长训练仍需要按具体实验命令开启 `--log-backend swanlab`。
 - Re-read if:
-  后续开始补基线实现、写实验章节、或安排服务器批量跑数时。
+  后续继续扩展实验记录、统一不同训练脚本的监控接口，或把服务器训练接到同一看板时。
 
-## 2026-03-31 13:22 CST - 新主方法 dual_axis_memory 已接入并完成首轮 probe
+## 2026-04-01 06:24 CST - 论文主稿骨架落地
 - Scope:
-  把用户定义的“横向 + 纵向双轴追忆”收敛成一个单独的方法名并接入当前实验框架。
+  将已有方法笔记与实验记录收敛成一份可继续扩写的论文初稿。
 - Change:
-  新增 `dual_axis_memory`：行内分支保持标准 causal self-attention；同列分支用独立 `q_col` 检索前层同 token 输出，并在纵向分支上直接令 `K = V = x`。训练入口已支持该方法。
+  新增 `paper_draft.md`，写入题目、摘要、引言、方法、实验设置、结果、讨论、结论和补写清单。
 - Why it matters:
-  现在主论文最小对比集 `baseline / attn_residuals / ours` 已经可以直接运行，不需要继续借用旧的 `depth_memory_*` 名字代指你的最终方法。
+  项目已经从“方法探索”进入“论文收束”阶段，需要一个稳定的主叙事承接后续 Related Work、表格和图。
 - Open items:
-  小型 CPU probe 说明实现稳定，但结果暂时只和 `baseline` 接近、弱于 `attn_residuals`；需要更合适的规模与预算验证趋势，并视情况加入 gate 或进一步对齐归一化。
+  仍需补正式公式排版、参考文献、表格格式，以及决定是否把 `dual_axis_*` 系列并入正文。
 - Re-read if:
-  后续决定 `ours` 的最终结构、整理主表、或解释为什么第一轮 probe 没有立刻超过 `attn_residuals` 时。
+  后续继续论文写作、改摘要、改标题，或将 Markdown 稿件迁移到 LaTeX 时。
