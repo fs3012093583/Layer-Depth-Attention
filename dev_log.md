@@ -66,3 +66,36 @@
 - Side effects: The aborted `eval100` run should be ignored; its partial monitoring record is not part of the fair-comparison set.
 - Verification: Server `python.exe` process was terminated successfully via `taskkill /F /IM python.exe`.
 - Next step: Push the `eval20` script update, resync the server, and restart the run with SwanLab.
+
+### [Step 006] - 2026-04-02 21:05 CST - Consolidate confirmed dual-axis-full issues into the design report
+- Request: Put all previously identified `dual_axis_full` issues, mismatches, and optimization suggestions into the model design report Markdown.
+- Plan: Append a dedicated issue/optimization section to `docs/dual_axis_full_architecture.md`, focusing only on already-confirmed findings from the live code path rather than speculative ideas.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/docs/dual_axis_full_architecture.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added a new section summarizing the confirmed code/doc mismatches, the `_attn_res_mix` scaling issue, the `DualAxisMemoryAttention` score/value path issue, the always-available `embedding` candidate issue, and the recommended repair order.
+- Rationale: The architecture discussion had become fragmented across chat turns; the design report now serves as the single source of truth for the current known problems and next-step fixes.
+- Key details: The added section explicitly downgrades the document from “strict 1:1 final spec” to “design blueprint + implementation gap report + repair roadmap.”
+- Side effects: The document is now more accurate, but it also means older claims of perfect 1:1 correspondence should no longer be cited.
+- Verification: Re-read the target sections of `docs/dual_axis_full_architecture.md` after patching.
+- Next step: If needed, continue by implementing the next priority fix: split `DualAxisMemoryAttention` score/value paths.
+
+### [Step 007] - 2026-04-02 21:11 CST - Record the unresolved depth-identity concern
+- Request: Add another possible issue to the Dual-Axis Full report: attention may not be able to tell whether a historical token comes from a shallow or deep layer, though this may or may not matter in practice.
+- Plan: Record it as a hypothesis/ablation target rather than as a confirmed bug.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/docs/dual_axis_full_architecture.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added a new issue item describing the lack of explicit depth identity markers in the stacked history, along with both possible interpretations and suggested ablation directions.
+- Rationale: This concern is plausible and important enough to preserve, but the current evidence does not justify labeling it as an already-confirmed implementation defect.
+- Key details: The document now distinguishes between confirmed problems and “potential structure risks worth testing.”
+- Side effects: None on code or running experiments.
+- Verification: Re-read the new “问题 D” subsection in `docs/dual_axis_full_architecture.md`.
+- Next step: Keep this as a future ablation candidate after the currently higher-priority score/value split issue.
+
+### [Step 008] - 2026-04-02 21:18 CST - Split DualAxisMemoryAttention score/value paths
+- Request: Fix `DualAxisMemoryAttention` so that normalized history is used only for memory score computation, while the memory value aggregation uses the original historical states.
+- Plan: Keep the module shape and public interface unchanged; only split the internal history tensor into a normalized score path and a raw value path.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Reworked `DualAxisMemoryAttention.forward()` to build `raw_memory_bank` and `normed_memory_bank` separately. `memory_scores` now uses `normed_memory_bank`, while `memory_context` aggregates over `raw_memory_bank`.
+- Rationale: This aligns the implementation with the intended “score on normalized history, read out original history” design and better matches ordinary attention semantics.
+- Key details: The change is local to the memory branch; token-side `q_row/k/v`, causal masking, and output projection are unchanged.
+- Side effects: Any currently running server-side `dual_axis_full` run still uses the older code until explicitly restarted.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py scripts/train_wikitext_lm.py` passed; local `TinyDecoderLM(attention_type='dual_axis_full')` forward/backward smoke test passed with output shape `(2, 32, 128)`.
+- Next step: If needed, sync this patch to the server and restart the active `dual_axis_full` training job on top of the new implementation.

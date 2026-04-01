@@ -96,10 +96,20 @@ class DualAxisMemoryAttention(MultiHeadAttentionBase):
         token_scores = token_scores.masked_fill(self._causal_mask(seq_len, x.device), float("-inf"))
 
         if past_states:
-            memory_bank = torch.stack(past_states, dim=2)
-            memory_bank = F.layer_norm(memory_bank, (memory_bank.size(-1),))
-            batch_size, memory_seq_len, num_past_layers, _ = memory_bank.shape
-            memory_bank = memory_bank.view(
+            # Keep two copies of the historical stack:
+            # - normalized history for score computation
+            # - raw history for value aggregation
+            raw_memory_bank = torch.stack(past_states, dim=2)
+            normed_memory_bank = F.layer_norm(raw_memory_bank, (raw_memory_bank.size(-1),))
+            batch_size, memory_seq_len, num_past_layers, _ = raw_memory_bank.shape
+            raw_memory_bank = raw_memory_bank.view(
+                batch_size,
+                memory_seq_len,
+                num_past_layers,
+                self.num_heads,
+                self.head_dim,
+            ).permute(0, 3, 1, 2, 4)
+            normed_memory_bank = normed_memory_bank.view(
                 batch_size,
                 memory_seq_len,
                 num_past_layers,
@@ -107,13 +117,13 @@ class DualAxisMemoryAttention(MultiHeadAttentionBase):
                 self.head_dim,
             ).permute(0, 3, 1, 2, 4)
 
-            memory_scores = (q_col.unsqueeze(3) * memory_bank).sum(dim=-1) / math.sqrt(self.head_dim)
+            memory_scores = (q_col.unsqueeze(3) * normed_memory_bank).sum(dim=-1) / math.sqrt(self.head_dim)
             scores = torch.cat([token_scores, memory_scores], dim=-1)
             weights = self.dropout(torch.softmax(scores, dim=-1))
             token_weights = weights[..., :seq_len]
             memory_weights = weights[..., seq_len:]
             token_context = torch.matmul(token_weights, v)
-            memory_context = (memory_weights.unsqueeze(-1) * memory_bank).sum(dim=3)
+            memory_context = (memory_weights.unsqueeze(-1) * raw_memory_bank).sum(dim=3)
             attn = token_context + memory_context
         else:
             weights = self.dropout(torch.softmax(token_scores, dim=-1))
