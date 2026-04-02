@@ -1,7 +1,9 @@
 import argparse
 import json
 import random
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-backend", choices=["none", "swanlab"], default="none")
     parser.add_argument("--log-project", default="Layer-Depth-Attention")
     parser.add_argument("--log-experiment-name", default=None)
+    parser.add_argument("--run-note", default="")
     return parser.parse_args()
 
 
@@ -60,6 +63,33 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def current_git_revision() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def print_run_header(args: argparse.Namespace) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    metadata = {
+        "event": "run_start",
+        "time": timestamp,
+        "script": "train_assoc_recall.py",
+        "git_rev": current_git_revision(),
+        "attention_type": args.attention_type,
+        "run_note": args.run_note,
+    }
+    print("[run-meta] " + json.dumps(metadata, ensure_ascii=True))
 
 
 @torch.no_grad()
@@ -100,6 +130,7 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(args.device)
+    print_run_header(args)
 
     cfg = AssocRecallConfig(vocab_size=args.vocab_size, num_pairs=args.num_pairs)
     train_data = AssociativeRecallDataset(cfg, seed=args.seed)

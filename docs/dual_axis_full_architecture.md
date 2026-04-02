@@ -67,7 +67,7 @@
 
 > [!WARNING]
 > **📝 修复项 (TODO)**
-> - [ ] 公式中计算点积打分时，遗漏了缩放因子。**应该除以 $\sqrt{D}$**，以此保证模型深网参数放缩时的稳定性。
+> - [x] 公式中计算点积打分时，遗漏了缩放因子。**应该除以 $\sqrt{D}$**，以此保证模型深网参数放缩时的稳定性。
 
 1. **深度加权注意力**: 使用独立的查询向量 $q_{depth}^{l}$ 去与所有 $M$ 个特征计算点积打分。
    $$\text{Scores}_{depth} = V_{norm} \cdot q_{depth}^{l} \in \mathbb{R}^{B \times S \times M}$$
@@ -199,7 +199,7 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 
 ### 5.2 已确认的高优先级结构问题
 
-#### 问题 A：预混合深度分支的缩放项
+#### 问题 A：预混合深度分支的缩放项（已修复）
 
 预混合深度分支：
 
@@ -213,7 +213,7 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 - 这一项已经作为高优先级修复加入实现。
 - 后续所有正式 `dual_axis_full` 对照实验应以“带缩放”的版本为准。
 
-#### 问题 B：`DualAxisMemoryAttention` 的 score/value 没有拆路径
+#### 问题 B：`DualAxisMemoryAttention` 的 score/value 没有拆路径（已修复）
 
 当前更合理的写法应为：
 

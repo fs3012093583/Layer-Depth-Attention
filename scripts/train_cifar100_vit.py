@@ -1,7 +1,9 @@
 import argparse
 import json
 import random
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -41,6 +43,7 @@ def parse_args() -> argparse.Namespace:
         default="baseline",
     )
     parser.add_argument("--output", default=None)
+    parser.add_argument("--run-note", default="")
     return parser.parse_args()
 
 
@@ -49,6 +52,33 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def current_git_revision() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def print_run_header(args: argparse.Namespace) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    metadata = {
+        "event": "run_start",
+        "time": timestamp,
+        "script": "train_cifar100_vit.py",
+        "git_rev": current_git_revision(),
+        "attention_type": args.attention_type,
+        "run_note": args.run_note,
+    }
+    print("[run-meta] " + json.dumps(metadata, ensure_ascii=True))
 
 
 def build_loaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]:
@@ -113,6 +143,7 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(args.device)
+    print_run_header(args)
 
     train_loader, test_loader = build_loaders(args)
     model = TinyVisionTransformer(

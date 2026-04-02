@@ -99,3 +99,82 @@
 - Side effects: Any currently running server-side `dual_axis_full` run still uses the older code until explicitly restarted.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py scripts/train_wikitext_lm.py` passed; local `TinyDecoderLM(attention_type='dual_axis_full')` forward/backward smoke test passed with output shape `(2, 32, 128)`.
 - Next step: If needed, sync this patch to the server and restart the active `dual_axis_full` training job on top of the new implementation.
+
+### [Step 009] - 2026-04-02 21:10 CST - Add startup metadata banners to experiment logs
+- Request: From the next experiment onward, print an explicit marker at the start of each log showing the run time, version, and what changed.
+- Plan: Add a lightweight startup header to every experiment entry script, with an optional `--run-note` field for manually describing what changed in the current run.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext_lm.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_assoc_recall.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_cifar100_vit.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added a `[run-meta]` JSON line at startup containing local timestamp, script name, git short SHA, `attention_type`, and optional `run_note`; exposed `--run-note` in all three scripts.
+- Rationale: This makes experiment logs self-identifying and removes ambiguity about which code version and which local change set produced a run.
+- Key details: The metadata is printed before `model_params`, so it appears at the top of the console log; `git_rev` is resolved from the local repo and falls back to `unknown` if Git is unavailable.
+- Side effects: Existing launch scripts continue to work unchanged because `--run-note` is optional. Already-running experiments will not retroactively gain this header.
+- Verification: `python -m py_compile` passed for all three scripts; a 1-step local `train_assoc_recall.py` smoke run printed the expected `[run-meta]` JSON header.
+- Next step: If a future run needs an explicit human-readable change summary, pass it through `--run-note "..."` in the launch command.
+
+### [Step 010] - 2026-04-03 00:12 CST - Record the repaired dual-axis-full 20000-step result
+- Request: Read back the result of the restarted `dual_axis_full_true_bs8_s20000_eval20` run after applying both the `_attn_res_mix` scaling fix and the `DualAxisMemoryAttention` score/value split.
+- Plan: Read the final JSON artifact, confirm the training process has exited, and summarize both the best checkpoint and the final trajectory.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Logged the completed long-run result from `artifacts/wikitext2_dual_axis_full_true_bs8_s20000_eval20.json`.
+- Rationale: This run is the first `dual_axis_full` result that includes both high-priority architecture fixes while still preserving the old `eval_batches=20` comparison protocol.
+- Key details:
+  - Final step: `20000`
+  - Final train loss: `2.7055`
+  - Final val loss / ppl: `2.9979 / 20.04`
+  - Best val step: `18000`
+  - Best val loss / ppl: `2.9780 / 19.65`
+  - Best test loss / ppl: `3.1609 / 23.59`
+  - Elapsed time at step `20000`: `239.71` minutes
+- Side effects: The corresponding SwanLab run `dual_axis_full_true_bs8_s20000_eval20` is complete; no active server python process remains.
+- Verification: Read the full remote artifact JSON and confirmed no `python` training process remains on the server.
+- Next step: Compare this repaired `dual_axis_full` result against the prior `dual_axis_full` baseline and the other long-run controls.
+
+### [Step 011] - 2026-04-03 00:32 CST - Re-audit dual-axis-full architecture issues
+- Request: Review the model architecture design document and summarize what problems still remain in the current model.
+- Plan: Re-read the current `dual_axis_full` design report, separate already-fixed issues from still-open issues and hypotheses, and produce a prioritized architecture review for the user.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Recorded the current architecture-review pass and its scope.
+- Rationale: The design report now mixes blueprint content, repaired items, and speculative risks; the user needs a clean “what is still wrong now” summary.
+- Key details:
+  - Confirmed the document still overstates itself as a “1:1 完美复刻级设计” while section 5 explicitly says code and doc are not fully aligned.
+  - Confirmed the previously high-priority `_attn_res_mix` scaling issue and `DualAxisMemoryAttention` score/value split issue have already been repaired in code.
+  - Remaining open items are mainly: persistent `x_0` in residual candidates, lack of explicit depth identity, ineffective residual flags for `dual_axis_full`, and unresolved row/column query/projection design choices.
+- Side effects: None on code; this is an analysis checkpoint.
+- Verification: Re-read `docs/dual_axis_full_architecture.md` and inspected the relevant `dual_axis_full` locations in `src/layer_depth_attention/model.py`.
+- Next step: Report the remaining issues to the user with a clear priority split: confirmed open problems vs hypotheses worth ablation.
+
+### [Step 012] - 2026-04-03 00:49 CST - Add no-final-mix dual-axis-full ablation
+- Request: Remove the final `_attn_res_dual_axis_mix` output stage and rerun the same `dual_axis_full` experiment to test whether the final global remix is actually necessary.
+- Plan: Preserve the existing `dual_axis_full` path for comparison, introduce a new `dual_axis_full_no_final_mix` attention type that reuses the repaired body but outputs directly from the last nonlinear history state, then add a dedicated launch script with the same `20000 step / eval20` protocol.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_dual_axis_full_no_final_mix_true_bs8_s20000_eval20.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Added `dual_axis_full_no_final_mix` to `TinyDecoderLM`.
+  - Reused the repaired dual-axis attention body, but skipped the final global remix and fed `history[-1]` directly into `final_norm -> lm_head`.
+  - Added a separate launch script and run note so the ablation result will not overwrite the repaired `dual_axis_full` baseline.
+- Rationale: This isolates the effect of the final output-side remix without invalidating the existing repaired `dual_axis_full` result.
+- Key details: The new variant keeps the repaired `_attn_res_mix` scaling and the split `DualAxisMemoryAttention` score/value paths; only the final `out_final = _attn_res_dual_axis_mix(...)` stage is removed.
+- Side effects: Old `dual_axis_full` checkpoints and scripts remain valid and directly comparable.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py scripts/train_wikitext_lm.py` passed; local `TinyDecoderLM(attention_type='dual_axis_full_no_final_mix')` forward/backward smoke test passed with output shape `(2, 32, 128)`.
+- Next step: Commit and push the new ablation, sync the server, and start the `dual_axis_full_no_final_mix_true_bs8_s20000_eval20` run.
+
+### [Step 013] - 2026-04-03 00:58 CST - Fix no-final-mix CLI registration
+- Request: Start the new `dual_axis_full_no_final_mix` experiment on the server.
+- Plan: Repair any launch-path issues discovered during the first remote start attempt, then relaunch without changing the model definition.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext_lm.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added `dual_axis_full_no_final_mix` to the `--attention-type` argparse choices in `train_wikitext_lm.py`.
+- Rationale: The first server launch attempt failed immediately because the new attention type existed in the model code but was still rejected by the training script's CLI whitelist.
+- Key details: The failure mode was clean: argparse reported `invalid choice: 'dual_axis_full_no_final_mix'`; no training actually started.
+- Side effects: None on old experiments; this only repairs the training entrypoint for the new ablation.
+- Verification: Remote launch stderr showed the missing CLI choice; local source now includes the new option in the parser choices list.
+- Next step: Amend/push the fix, sync the server, and relaunch the `dual_axis_full_no_final_mix_true_bs8_s20000_eval20` run.
+
+### [Step 014] - 2026-04-03 01:05 CST - Make run metadata banner Windows-safe
+- Request: Relaunch the `dual_axis_full_no_final_mix` long run after fixing the CLI registration issue.
+- Plan: Repair any remaining launch-only blockers without changing the model, then restart the experiment.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext_lm.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_assoc_recall.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_cifar100_vit.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Changed all `[run-meta]` JSON prints from `ensure_ascii=False` to `ensure_ascii=True`.
+- Rationale: The relaunch failed before training because Windows console output used `gbk`, and the JSON startup banner tried to print non-ASCII characters from `run_note`.
+- Key details: This is a logging-only compatibility fix; it does not change any model or optimizer behavior.
+- Side effects: Startup metadata now prints escaped Unicode instead of raw UTF-8/Chinese characters, which is safer for remote Windows sessions.
+- Verification: Remote traceback clearly showed `UnicodeEncodeError` in `print_run_header()`; the three training scripts now all print ASCII-safe startup metadata.
+- Next step: Amend/push this fix, resync the server, and relaunch the `dual_axis_full_no_final_mix_true_bs8_s20000_eval20` run.

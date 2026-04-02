@@ -3,8 +3,10 @@ import copy
 import json
 import math
 import random
+import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -49,6 +51,7 @@ def parse_args() -> argparse.Namespace:
             "baseline",
             "dual_axis_memory",
             "dual_axis_full",
+            "dual_axis_full_no_final_mix",
             "depth_memory",
             "depth_memory_2d_prefix",
             "depth_memory_qkv_reproj",
@@ -73,6 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-backend", choices=["none", "swanlab"], default="none")
     parser.add_argument("--log-project", default="Layer-Depth-Attention")
     parser.add_argument("--log-experiment-name", default=None)
+    parser.add_argument("--run-note", default="")
     return parser.parse_args()
 
 
@@ -131,6 +135,33 @@ def cosine_lr(step: int, total_steps: int, base_lr: float, warmup_steps: int, mi
     return base_lr * (min_lr_scale + (1.0 - min_lr_scale) * cosine)
 
 
+def current_git_revision() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def print_run_header(args: argparse.Namespace) -> None:
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    metadata = {
+        "event": "run_start",
+        "time": timestamp,
+        "script": "train_wikitext_lm.py",
+        "git_rev": current_git_revision(),
+        "attention_type": args.attention_type,
+        "run_note": args.run_note,
+    }
+    print("[run-meta] " + json.dumps(metadata, ensure_ascii=True))
+
+
 @torch.no_grad()
 def evaluate(
     model: TinyDecoderLM,
@@ -177,6 +208,7 @@ def main() -> None:
     args = apply_model_preset(args)
     set_seed(args.seed)
     device = torch.device(args.device)
+    print_run_header(args)
 
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True

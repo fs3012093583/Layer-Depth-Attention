@@ -707,6 +707,7 @@ class TinyDecoderLM(nn.Module):
             "attn_residuals",
             "attn_residuals_dual_axis",
             "dual_axis_full",
+            "dual_axis_full_no_final_mix",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",
             "attn_residuals_moe",
@@ -718,6 +719,9 @@ class TinyDecoderLM(nn.Module):
             block_attention_type = "baseline"
             block_ffn_type = "dense"
         elif attention_type == "dual_axis_full":
+            block_attention_type = "dual_axis_memory"
+            block_ffn_type = "dense"
+        elif attention_type == "dual_axis_full_no_final_mix":
             block_attention_type = "dual_axis_memory"
             block_ffn_type = "dense"
         elif attention_type == "attn_residuals_value_reproj":
@@ -761,7 +765,7 @@ class TinyDecoderLM(nn.Module):
             nn.init.normal_(self.attn_res_queries, std=0.02)
             nn.init.normal_(self.mlp_res_queries, std=0.02)
             nn.init.normal_(self.final_res_query, std=0.02)
-        if attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+        if attention_type in {"attn_residuals_dual_axis", "dual_axis_full", "dual_axis_full_no_final_mix"}:
             self.attn_res_row_q_projs = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(num_layers)])
             self.mlp_res_row_q_projs = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(num_layers)])
             self.final_res_row_q_proj = nn.Linear(d_model, d_model)
@@ -829,6 +833,7 @@ class TinyDecoderLM(nn.Module):
             "attn_residuals",
             "attn_residuals_dual_axis",
             "dual_axis_full",
+            "dual_axis_full_no_final_mix",
             "attn_residuals_value_reproj",
             "attn_residuals_value_reproj_normed",
             "attn_residuals_moe",
@@ -837,7 +842,7 @@ class TinyDecoderLM(nn.Module):
             history: List[torch.Tensor] = []
             past_kv: List[KVCache] = []
             for idx, block in enumerate(self.blocks):
-                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full", "dual_axis_full_no_final_mix"}:
                     attn_input = self._attn_res_dual_axis_mix(
                         embedding,
                         history,
@@ -853,7 +858,7 @@ class TinyDecoderLM(nn.Module):
                 history.append(attn_out)
                 past_kv.append(current_kv)
 
-                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+                if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full", "dual_axis_full_no_final_mix"}:
                     mlp_input = self._attn_res_dual_axis_mix(
                         embedding,
                         history,
@@ -865,7 +870,11 @@ class TinyDecoderLM(nn.Module):
                 mlp_out = block.mlp(block.mlp_norm(mlp_input))
                 history.append(mlp_out)
 
-            if self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
+            if self.attention_type == "dual_axis_full_no_final_mix":
+                # Ablation: skip the final global dual-axis remixture and expose the
+                # last nonlinear state directly to the output head.
+                x = history[-1] if history else embedding
+            elif self.attention_type in {"attn_residuals_dual_axis", "dual_axis_full"}:
                 x = self._attn_res_dual_axis_mix(
                     embedding,
                     history,
