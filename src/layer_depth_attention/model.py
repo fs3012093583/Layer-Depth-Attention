@@ -823,7 +823,55 @@ class TinyDecoderLM(nn.Module):
         row_q_proj: nn.Linear,
     ) -> torch.Tensor:
         current = history[-1] if history else embedding
-        return self._residual_row_mix(current, row_q_proj) + self._attn_res_mix(embedding, history, depth_query)
+        current_norm = self._rms_norm_tensor(current)
+        q_row = self._split_heads(row_q_proj(current_norm))
+        row_values = self._split_heads(current_norm)
+        seq_len = current.size(1)
+
+        row_scores = torch.matmul(q_row, row_values.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=current.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        row_scores = row_scores.masked_fill(causal_mask, float("-inf"))
+
+        depth_values = [embedding] + history
+        depth_stacked = torch.stack(depth_values, dim=2)
+        depth_normed = self._rms_norm_tensor(depth_stacked)
+        num_depth_slots = depth_stacked.size(2)
+
+        depth_values_heads = depth_stacked.view(
+            depth_stacked.size(0),
+            depth_stacked.size(1),
+            num_depth_slots,
+            self.num_heads,
+            self.head_dim,
+        ).permute(0, 3, 1, 2, 4)
+        depth_normed_heads = depth_normed.view(
+            depth_normed.size(0),
+            depth_normed.size(1),
+            num_depth_slots,
+            self.num_heads,
+            self.head_dim,
+        ).permute(0, 3, 1, 2, 4)
+        depth_query_heads = depth_query.view(self.num_heads, self.head_dim)
+
+        # The dual-axis pre-mix now does one global competition:
+        # compute row-axis and depth-axis scores separately, concatenate them,
+        # then apply a single softmax over the joint candidate space.
+        depth_scores = torch.einsum(
+            "bhsmd,hd->bhsm",
+            depth_normed_heads,
+            depth_query_heads,
+        ) / math.sqrt(self.head_dim)
+        all_scores = torch.cat([row_scores, depth_scores], dim=-1)
+        all_weights = torch.softmax(all_scores, dim=-1)
+
+        row_weights = all_weights[..., :seq_len]
+        depth_weights = all_weights[..., seq_len:]
+        row_context = torch.matmul(row_weights, row_values)
+        depth_context = (depth_weights.unsqueeze(-1) * depth_values_heads).sum(dim=3)
+        return self._merge_heads(row_context + depth_context)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape

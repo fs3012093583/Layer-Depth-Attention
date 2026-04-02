@@ -178,3 +178,40 @@
 - Side effects: Startup metadata now prints escaped Unicode instead of raw UTF-8/Chinese characters, which is safer for remote Windows sessions.
 - Verification: Remote traceback clearly showed `UnicodeEncodeError` in `print_run_header()`; the three training scripts now all print ASCII-safe startup metadata.
 - Next step: Amend/push this fix, resync the server, and relaunch the `dual_axis_full_no_final_mix_true_bs8_s20000_eval20` run.
+
+### [Step 015] - 2026-04-03 01:13 CST - Restore SwanLab logging for no-final-mix run
+- Request: Stop the currently running `no_final_mix` experiment and restart it so the run appears in SwanLab.
+- Plan: Identify why the current run says `init skipped: monitor disabled`, then fix only the launch/runtime environment and restart the same experiment without changing the model.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Diagnosed that the previous launch path was invoking the wrong Python (`D:\\Annaconda\\python.exe`) because `activate.bat` was being called from PowerShell and not affecting the subsequent interpreter resolution. Restarted the run using the explicit environment Python `D:\\Annaconda\\envs\\pt-3.9\\python.exe`.
+- Rationale: SwanLab was installed and login-ready in `pt-3.9`, but not guaranteed in the default base interpreter, which caused the monitor to downgrade to disabled even though training itself started.
+- Key details:
+  - Verified `D:\\Annaconda\\envs\\pt-3.9\\python.exe` can import `swanlab` and `swanlab.login()` succeeds.
+  - Stopped the old process `PID 38856`.
+  - Relaunched `dual_axis_full_no_final_mix_true_bs8_s20000_eval20` with the explicit env Python and a new `run_note`.
+  - Confirmed new console output: `[swanlab] login succeeded` and `Syncing run dual_axis_full_no_final_mix_true_bs8_s20000_eval20 to the cloud`.
+  - Current run URL: `https://swanlab.cn/@justbook/Layer-Depth-Attention/runs/0kc4g067qjebjqfmxioc2`
+- Side effects: The current server-side run now has SwanLab tracking, but the launch was done through a direct command rather than the `.bat` script because the `.bat`/PowerShell path was the source of the environment mismatch.
+- Verification: Observed `login_ok` from the env Python, then observed successful SwanLab initialization output and cloud sync URL from the restarted run.
+- Next step: Monitor the first evaluation point (`step=1`/`step=400`) and keep this explicit-env launch pattern for future Windows SwanLab runs unless the batch activation path is simplified.
+
+### [Step 016] - 2026-04-03 01:31 CST - Switch dual-axis pre-mix to joint row/depth softmax
+- Request: Change every mixed row/column attention-matrix computation so that x-axis and y-axis scores are concatenated first and normalized together with one softmax, rather than separately normalized and then added.
+- Plan: Audit all mixed-attention sites, confirm which ones already use global score concatenation, and patch only the remaining dual-axis pre-mix path that still did separate row/depth normalization.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Reworked `TinyDecoderLM._attn_res_dual_axis_mix()` so it now:
+    1. computes row-axis causal scores,
+    2. computes depth-axis history scores,
+    3. concatenates the two score tensors,
+    4. applies a single softmax over the joint candidate space,
+    5. splits the unified weights back into row/depth parts for context aggregation.
+  - Preserved raw depth values for the depth branch and causal masking for the row branch.
+  - Fixed a follow-up regression by replacing the accidental call to a missing `_causal_mask()` helper with a local triangular mask inside `TinyDecoderLM`.
+- Rationale: The user wants the dual-axis pre-mix to follow the same “global competition” principle already used in the main mixed attention layers, instead of artificially assigning separate normalized budgets to row and depth branches.
+- Key details:
+  - Audit result: the main attention layers (`DualAxisMemoryAttention`, `LayerDepth*`, FFN q-attention variants) already concatenate scores before softmax; only the residual-style dual-axis pre-mix path still used separate normalization.
+  - The new implementation keeps the row branch multi-head and reshapes the depth query/history into head space so both branches can compete in a single score tensor.
+- Side effects: This changes the semantics of both `attn_residuals_dual_axis` and `dual_axis_full*`, because they share `_attn_res_dual_axis_mix()`.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py` passed; local forward/backward smoke tests passed for `dual_axis_full` and `dual_axis_full_no_final_mix`, both with output shape `(2, 32, 128)`.
+- Next step: If desired, commit this structural change separately and rerun the active dual-axis experiments under the new joint-softmax pre-mix definition.
