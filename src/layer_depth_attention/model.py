@@ -80,6 +80,7 @@ class DualAxisMemoryAttention(MultiHeadAttentionBase):
     def __init__(self, d_model: int, num_heads: int, dropout: float) -> None:
         super().__init__(d_model, num_heads, dropout)
         self.column_q_proj = nn.Linear(d_model, d_model)
+        self.memory_v_proj = nn.Linear(d_model, d_model)
 
     def forward(
         self,
@@ -98,11 +99,12 @@ class DualAxisMemoryAttention(MultiHeadAttentionBase):
         if past_states:
             # Keep two copies of the historical stack:
             # - normalized history for score computation
-            # - raw history for value aggregation
+            # - learned value projection over the raw history for memory content
             raw_memory_bank = torch.stack(past_states, dim=2)
             normed_memory_bank = F.layer_norm(raw_memory_bank, (raw_memory_bank.size(-1),))
+            projected_memory_bank = self.memory_v_proj(raw_memory_bank)
             batch_size, memory_seq_len, num_past_layers, _ = raw_memory_bank.shape
-            raw_memory_bank = raw_memory_bank.view(
+            projected_memory_bank = projected_memory_bank.view(
                 batch_size,
                 memory_seq_len,
                 num_past_layers,
@@ -123,7 +125,7 @@ class DualAxisMemoryAttention(MultiHeadAttentionBase):
             token_weights = weights[..., :seq_len]
             memory_weights = weights[..., seq_len:]
             token_context = torch.matmul(token_weights, v)
-            memory_context = (memory_weights.unsqueeze(-1) * raw_memory_bank).sum(dim=3)
+            memory_context = (memory_weights.unsqueeze(-1) * projected_memory_bank).sum(dim=3)
             attn = token_context + memory_context
         else:
             weights = self.dropout(torch.softmax(token_scores, dim=-1))
@@ -835,7 +837,15 @@ class TinyDecoderLM(nn.Module):
         )
         row_scores = row_scores.masked_fill(causal_mask, float("-inf"))
 
-        depth_values = [embedding] + history
+        # The row branch already covers the newest state (`current`). Exclude it from
+        # the depth branch so one logical candidate does not occupy two slots in the
+        # same joint-softmax competition.
+        depth_values = [embedding] + history[:-1] if history else []
+        if not depth_values:
+            row_weights = torch.softmax(row_scores, dim=-1)
+            row_context = torch.matmul(row_weights, row_values)
+            return self._merge_heads(row_context)
+
         depth_stacked = torch.stack(depth_values, dim=2)
         depth_normed = self._rms_norm_tensor(depth_stacked)
         num_depth_slots = depth_stacked.size(2)

@@ -215,3 +215,32 @@
 - Side effects: This changes the semantics of both `attn_residuals_dual_axis` and `dual_axis_full*`, because they share `_attn_res_dual_axis_mix()`.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py` passed; local forward/backward smoke tests passed for `dual_axis_full` and `dual_axis_full_no_final_mix`, both with output shape `(2, 32, 128)`.
 - Next step: If desired, commit this structural change separately and rerun the active dual-axis experiments under the new joint-softmax pre-mix definition.
+
+### [Step 017] - 2026-04-03 01:56 CST - Review repaired dual-axis implementation for hidden regressions
+- Request: Explain why newer, theoretically cleaner dual-axis variants can underperform older rougher versions, and check whether the implementation itself has concrete problems.
+- Plan: Inspect the repaired `dual_axis_full` code paths for high-impact implementation mismatches that could distort routing or memory semantics independently of the high-level theory.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Recorded two high-confidence implementation findings from the code review.
+- Rationale: The user asked specifically whether the code implementation may be wrong, not just whether the architecture changed.
+- Key details:
+  - In the new joint-softmax `_attn_res_dual_axis_mix()`, the newest state appears twice in the unified candidate pool: once through the row branch over `current`, and again through the depth branch because `depth_values = [embedding] + history` still includes that same newest state. Under one shared softmax, this duplicates probability mass for the latest state.
+  - `DualAxisMemoryAttention` still does not implement the documented `Out_memory = W_memory * H` style value projection. After the score/value split repair, it now reads raw `H` as memory values but only reshapes raw history into heads instead of learning a separate memory-value projection, so token-side `V` and memory-side `value` live in mismatched content spaces.
+- Side effects: None on code; this is a review-only checkpoint.
+- Verification: Re-read `src/layer_depth_attention/model.py` around `DualAxisMemoryAttention.forward()` and `_attn_res_dual_axis_mix()`.
+- Next step: Report these findings to the user and recommend fixing the duplicate latest-state candidate and the missing learned memory-value projection before trusting further “fixed vs buggy” comparisons.
+
+### [Step 018] - 2026-04-03 02:07 CST - Fix duplicate-candidate routing and add memory-value projection
+- Request: Fix both newly identified implementation problems at once, then update the algorithm design document to match the repaired implementation.
+- Plan: Patch `DualAxisMemoryAttention` to add a learned memory-value projection, patch `_attn_res_dual_axis_mix()` to remove the newest-state duplicate from the depth candidate pool, and rewrite the design doc formulas/status notes accordingly.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/docs/dual_axis_full_architecture.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Added `memory_v_proj` to `DualAxisMemoryAttention` and changed the memory branch to aggregate projected historical values rather than raw head-sliced history.
+  - Changed `_attn_res_dual_axis_mix()` so the depth branch no longer includes the newest state already covered by the row branch; when there is no older history, the pre-mix now falls back to pure row attention.
+  - Updated the design report so section 2 reflects the new joint-softmax pre-mix semantics, section 3 reflects the explicit memory-value projection, and section 5 reclassifies repaired vs still-open issues.
+- Rationale: These two implementation gaps were strong candidates for why theoretically cleaner versions could underperform: one duplicated probability mass for the latest state, the other mixed token-side learned values with raw history-side values in mismatched content spaces.
+- Key details:
+  - `DualAxisMemoryAttention` parameter count increased because the memory path now has its own value projection.
+  - The depth candidate pool in the dual-axis pre-mix is now `[x_0] + history[:-1]` when history exists, instead of `[x_0] + history`.
+- Side effects: This changes the semantics of both `dual_axis_full` and `dual_axis_full_no_final_mix`; old results before this patch are no longer strictly comparable to runs after this patch without noting the implementation revision.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py` passed; local forward/backward smoke tests passed for `dual_axis_full` and `dual_axis_full_no_final_mix`, both with output shape `(2, 32, 128)`. Parameter count in the smoke test rose from `533504` to `566528`, confirming the new memory value projection is active.
+- Next step: Commit these repairs, push to `develop`, and rerun the active `dual_axis_full_no_final_mix` experiment if the user wants fresh metrics under the repaired implementation.

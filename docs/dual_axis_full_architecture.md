@@ -1,6 +1,6 @@
 # Dual-Axis Full 模型架构详细设计蓝图
 
-本文档提供了 `dual_axis_full` 模型的 **1:1 完美复刻级设计说明**。包含完整的数学公式、维度变换记录以及所有操作步骤。任何人根据本文档即可用任何框架从零实现该架构。
+本文档提供了 `dual_axis_full` 模型的**当前修复后实现版设计说明**。包含核心数学公式、维度变换记录以及主要操作步骤，用于和当前仓库实现保持一致。
 
 ## 1. 宏观架构定义与输入层
 
@@ -41,27 +41,38 @@
    $x_{norm} = \text{RMSNorm}(x_{current}) $
 2. **行查询映射**: 通过独占的线性层获取当前序列的查询：
    $Q_{row} = x_{norm} W_{row\_q}^{l} \in \mathbb{R}^{B \times S \times D}$ （随后拆分为多头 $B \times H \times S \times d$）
-3. **因果自注意力与上下文**: 用 $x_{norm}$ 作为 Key 和 Value（在此步骤不经额外映射）：
+3. **行分支分数准备**: 用 $x_{norm}$ 作为 Key 和 Value（在此步骤不经额外映射）：
    $K_{row} = V_{row} = x_{norm}$ （同样拆分为多头）
    $$\text{Scores}_{row} = \frac{Q_{row} K_{row}^T}{\sqrt{d}}$$
    应用上三角（对角线向上平移 1）的因果 Mask（赋值为 $-\infty$）。
-   $$\text{Weights}_{row} = \text{Softmax}(\text{Scores}_{row})$$
-   $$\text{Context}_{row} = \text{Weights}_{row} V_{row} \in \mathbb{R}^{B \times S \times D}$$
+   在当前实现里，这一步**只生成行分支分数**，不在此处单独做 softmax；真正的归一化会在与深度分支分数拼接后统一完成。
 
 ### 步骤 2.3 纵向全局混合 (Column-wise Mix / Attention Residuals)
-> [!NOTE] 
+> [!NOTE]
 > **📝 预混合归一化机制与构成探讨 (TODO)**
 > - [ ] **跨层归一化有必要吗？** 
 >       *(解答：有必要，横向对 $x_{current}$ 或纵向对 $V_{stack}$ 归一化可防止数值爆炸，确立点积公平性。)*
 > - [x] **x和y轴分别先算出注意力矩阵归一化再后拼起来 VS 先拼起来再softmax，哪种较好？**
->       *(解答：各有用途。此处的预载混合使用分别归一化后相加，让时间和深度各自稳定发力；而下一节的核心 Attention 层则会把分数拼起来一起做全局竞争。)*
+>       *(当前实现：行轴和深度轴先分别计算分数，再把两组分数拼起来做一次统一 softmax，使二者在同一个候选池中全局竞争。)*
 > - [ ] **堆叠的 $V_{stack}$ 这里具体包括哪些历史元素？**
 >       *(解答：包含最根源的词向量 $x_0$，以及在这之前产生过的每一个 Attention 输出和每一个 MLP 输出的逐层累加。)*
 > - [ ] **这里有必要用 dropout 吗？**
 > - [ ] **这一步的输出基本上是接近归一化的，还需要归一化吗？如果需要，归一化后再输出到下一个模块？**
 
-1. **堆叠所有层**:
-   $V_{stack} = [x_0, \mathcal{H}[0], \dots, \mathcal{H}[-1]] \in \mathbb{R}^{B \times S \times M \times D}$  （其中 $M$ 是历史元素的总数）
+1. **构造深度候选池**:
+   为避免和横向分支中的最新状态重复竞争，深度候选池不再包含当前最新状态。也就是说：
+   \[
+   V_{stack} =
+   \begin{cases}
+   [\,], & \mathcal{H} = [] \\
+   [x_0, \mathcal{H}[0], \dots, \mathcal{H}[-2]], & \mathcal{H} \neq []
+   \end{cases}
+   \]
+   当存在历史时，
+   \[
+   V_{stack} \in \mathbb{R}^{B \times S \times M \times D}
+   \]
+   其中 \(M\) 是深度候选数。
 2. **RMSNorm**: 沿着维度 $D$ 做归一化。
    $V_{norm} = \text{RMSNorm}(V_{stack})$
 
@@ -69,11 +80,17 @@
 > **📝 修复项 (TODO)**
 > - [x] 公式中计算点积打分时，遗漏了缩放因子。**应该除以 $\sqrt{D}$**，以此保证模型深网参数放缩时的稳定性。
 
-1. **深度加权注意力**: 使用独立的查询向量 $q_{depth}^{l}$ 去与所有 $M$ 个特征计算点积打分。
-   $$\text{Scores}_{depth} = V_{norm} \cdot q_{depth}^{l} \in \mathbb{R}^{B \times S \times M}$$
-   $$\text{Weights}_{depth} = \text{Softmax}_{dim=2}(\text{Scores}_{depth})$$
-   通过加权求和得出最终的跨层残差平滑值：
-   $$\text{Context}_{depth} = \sum_{m=1}^{M} \text{Weights}_{depth}[..., m] \cdot V_{stack}[..., m, :] \in \mathbb{R}^{B \times S \times D}$$
+1. **深度打分**: 使用独立的查询向量 $q_{depth}^{l}$ 去与所有 $M$ 个特征计算点积打分。
+   $$\text{Scores}_{depth} = \frac{V_{norm} \cdot q_{depth}^{l}}{\sqrt{D}} \in \mathbb{R}^{B \times S \times M}$$
+2. **联合竞争**：
+   将横向分支和深度分支的分数拼接后统一归一化：
+   $$\text{Scores}_{all} = \text{Concat}([\text{Scores}_{row}, \text{Scores}_{depth}], \text{dim}=-1)$$
+   $$\text{Weights}_{all} = \text{Softmax}(\text{Scores}_{all})$$
+   再切分出：
+   $$W_{row}, W_{depth}$$
+3. **上下文恢复**：
+   $$\text{Context}_{row} = W_{row} V_{row}$$
+   $$\text{Context}_{depth} = \sum_{m=1}^{M} W_{depth}[..., m] \cdot V_{stack}[..., m, :] \in \mathbb{R}^{B \times S \times D}$$
 
 ### 步骤 2.4 最终混合输出
 $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \times S \times D}$$
@@ -116,7 +133,10 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 6. **上下文还原：**
    将 $\text{Weights}_{all}$ 切割还原回 $W_{token} \in \mathbb{R}^{S \times S}$ 和 $W_{memory} \in \mathbb{R}^{S \times L_{past}}$。
    $$\text{Out}_{token} = W_{token} V$$
-   $$\text{Out}_{memory} = W_{memory} \cdot \mathcal{H}$$
+   用原始历史状态经过独立的 memory value 投影得到 memory 内容：
+   $$V_{memory} = W_{memory} \cdot \mathcal{H}$$
+   然后再由切分得到的 memory 注意力权重 \(A_{memory}\) 对其聚合：
+   $$\text{Out}_{memory} = A_{memory} V_{memory}$$
    $$\text{Output}_{attn} = \text{Linear}_{out}(\text{Out}_{token} + \text{Out}_{memory}) \in \mathbb{R}^{B \times S \times D}$$
 
 算出 $\text{Output}_{attn}$ 后，**不再与 $\hat{x}_l$ 相加**，而是直接被加入全局历史：$\mathcal{H}\text{.append}(\text{Output}_{attn})$。
@@ -172,31 +192,20 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 
 ### 5.1 文档与实现并非严格 1:1
 
-当前这份蓝图不能再视为“已经和代码完全一致的最终规范”，原因至少包括：
+当前这份蓝图不能直接视为“彻底冻结、不再变化的最终规范”，原因至少包括：
 
-1. **`DualAxisMemoryAttention` 的 memory score/value 路径没有严格按本文当前公式实现**
-   - 本文当前写法是：
-     \[
-     \text{Scores}_{memory} \leftarrow \mathcal{H}_{norm},
-     \qquad
-     \text{Out}_{memory} \leftarrow \mathcal{H}
-     \]
-   - 但当前代码实现实际是：
-     \[
-     \text{Scores}_{memory} \leftarrow \mathcal{H}_{norm},
-     \qquad
-     \text{Out}_{memory} \leftarrow \mathcal{H}_{norm}
-     \]
-   - 也就是说，归一化后的历史张量同时被用于“匹配谁”和“读出什么”，这会改变 memory 分支的算法语义。
+1. **训练脚本里的 `attn_residual/ffn_residual` 对 `dual_axis_full` 实际无效**
+   - `dual_axis_full` 在 `TinyDecoderLM.forward()` 中走的是单独的主路径，不经过标准 `TransformerBlock.forward()` 的 residual 开关逻辑。
+   - 因此脚本里即使显式传了 `--attn-residual on --ffn-residual on`，也不会真的改变 `dual_axis_full` 的前向结构。
+   - 这会误导实验记录，后续正式实验表格中不应再把这两个开关当成 `dual_axis_full` 的有效配置项。
 
 2. **预混合深度分支原先缺少缩放项**
    - `_attn_res_mix()` 的深度打分本质上也是点积注意力，因此理论上应该除以 \(\sqrt{D}\)。
    - 当前仓库在最近一次修复中已经补上了这一项，但历史版本和部分实验结果未必包含这个修复，因此阅读旧结果时必须标明。
 
-3. **训练脚本里的 `attn_residual/ffn_residual` 对 `dual_axis_full` 实际无效**
-   - `dual_axis_full` 在 `TinyDecoderLM.forward()` 中走的是单独的主路径，不经过标准 `TransformerBlock.forward()` 的 residual 开关逻辑。
-   - 因此脚本里即使显式传了 `--attn-residual on --ffn-residual on`，也不会真的改变 `dual_axis_full` 的前向结构。
-   - 这会误导实验记录，后续正式实验表格中不应再把这两个开关当成 `dual_axis_full` 的有效配置项。
+3. **部分结构问题仍在持续演进**
+   - 例如最终是否保留 `final mix`、是否加入显式 depth identity、以及行列查询是否共享等，都还处于实验验证阶段。
+   - 因此本文档已经更接近“实现对齐版蓝图 + 持续修复记录”，而不是一次性定稿的静态规范。
 
 ### 5.2 已确认的高优先级结构问题
 
@@ -214,7 +223,7 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 - 这一项已经作为高优先级修复加入实现。
 - 后续所有正式 `dual_axis_full` 对照实验应以“带缩放”的版本为准。
 
-#### 问题 B：`DualAxisMemoryAttention` 的 score/value 没有拆路径（已修复）
+#### 问题 B：`DualAxisMemoryAttention` 的 score/value 路径与 memory value 投影（已修复）
 
 当前更合理的写法应为：
 
@@ -228,30 +237,50 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 \]
 
 \[
-\text{Out}_{memory} = W_{memory} \cdot \mathcal{H}
+V_{memory} = W_{memory} \cdot \mathcal{H}
 \]
-
-而不是：
-
 \[
-\text{Scores}_{memory} \leftarrow \mathcal{H}_{norm},
-\qquad
-\text{Out}_{memory} \leftarrow \mathcal{H}_{norm}
+\text{Out}_{memory} = A_{memory} V_{memory}
 \]
 
-**为什么这是大问题**
+也就是说，修复后的目标不是简单把原始 `H` 直接 reshape 成 value，而是：
+- `H_norm` 只负责算 memory scores
+- 原始 `H` 先经过独立的 `memory_v_proj`
+- 再被 attention 权重聚合成 `Out_memory`
+
+**为什么这个修复重要**
 - `Scores_memory` 决定“看谁”
 - `Out_memory` 决定“看到什么”
-- 如果两者都直接使用归一化后的历史，就相当于把 history 的内容本身也洗平了
-- 这样 memory 分支更稳定，但也更可能损失原始历史状态中的幅值与内容差异
+- token 分支的 `V` 是学出来的 value 空间，因此 memory 分支也需要一个相容的 learned value 空间
+- 否则 token value 和 memory value 会在内容空间上不一致
 
 **当前建议**
-- 后续应做一组明确对照：
-  - `score 用 H_norm, value 用 H_norm`
-  - `score 用 H_norm, value 用 H`
-- 这组对照的目的不是微调数值，而是确认当前 memory 路径的算法语义到底该怎么定。
+- 后续仍值得做轻量对照：
+  - `score 用 H_norm, value 用 projected H`
+  - `score 用 H_norm, value 用 raw H`
+- 但当前主实现应以“独立 memory value 投影”作为正式版本。
 
-#### 问题 C：`embedding` 永久进入深度候选池
+#### 问题 C：联合 softmax 下最新状态重复候选（已修复）
+
+在新的双轴联合 softmax 预混合中，横向分支已经把当前最新状态 `current` 作为一整行前缀候选参与竞争。如果深度分支仍然使用：
+
+\[
+[x_0, \mathcal{H}[0], \dots, \mathcal{H}[-1]]
+\]
+
+那么 `history[-1]` 会和横向分支里的 `current` 代表同一个最新状态，从而在同一个联合 softmax 里出现两次。
+
+**为什么这是大问题**
+- 同一个语义候选会占据两个槽位
+- 最新状态会天然多一份概率质量入口
+- 这不是“更充分利用最新状态”，而是“重复候选偏置”
+
+**修复后的原则**
+- 横向分支负责当前最新状态的行内竞争
+- 深度分支只保留更早的历史候选
+- 也就是深度候选池不再包含当前最新状态
+
+#### 问题 D：`embedding` 永久进入深度候选池
 
 当前 `_attn_res_mix()` 每次都会把：
 
@@ -274,7 +303,7 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
   2. 只在早期若干层保留 `x_0`
   3. 最终去掉 `x_0` 常驻候选
 
-#### 问题 D：模型可能无法显式区分浅层历史与深层历史
+#### 问题 E：模型可能无法显式区分浅层历史与深层历史
 
 当前 `dual_axis_full` 在做深度混合或列向 memory 检索时，历史状态主要以张量堆叠的形式进入计算：
 
@@ -340,10 +369,14 @@ $$\hat{x}_l = \text{Context}_{row} + \text{Context}_{depth} \in \mathbb{R}^{B \t
 1. **先修 `_attn_res_mix()` 的缩放项**
    - 这是最小且理论最明确的修复。
 
-2. **再拆 `DualAxisMemoryAttention` 的 score/value 路径**
-   - 让 `H_norm` 只用于算分数，`Out_memory` 使用原始 `H`。
+2. **再修 `DualAxisMemoryAttention` 的 memory value 路径**
+   - 让 `H_norm` 只用于算分数；
+   - 让原始 `H` 先经过独立 `memory_v_proj` 再参与 memory 聚合。
 
-3. **最后再研究 `embedding` 是否应永久常驻候选池**
+3. **修复联合 softmax 下的重复候选**
+   - 行分支已经覆盖当前最新状态，深度分支不应再次把同一状态放入联合候选池。
+
+4. **最后再研究 `embedding` 是否应永久常驻候选池**
    - 这是更偏架构选择的问题，改动影响会更大，适合在前两项稳定后再做。
 
 ### 5.5 当前文档状态声明
