@@ -244,3 +244,60 @@
 - Side effects: This changes the semantics of both `dual_axis_full` and `dual_axis_full_no_final_mix`; old results before this patch are no longer strictly comparable to runs after this patch without noting the implementation revision.
 - Verification: `python -m py_compile src/layer_depth_attention/model.py` passed; local forward/backward smoke tests passed for `dual_axis_full` and `dual_axis_full_no_final_mix`, both with output shape `(2, 32, 128)`. Parameter count in the smoke test rose from `533504` to `566528`, confirming the new memory value projection is active.
 - Next step: Commit these repairs, push to `develop`, and rerun the active `dual_axis_full_no_final_mix` experiment if the user wants fresh metrics under the repaired implementation.
+
+### [Step 019] - 2026-04-03 02:16 CST - Switch row-branch values back to raw current states
+- Request: For the dual-axis pre-mix row branch, stop using the normalized current state as the value path and instead use the original current state content.
+- Plan: Keep `Q_row` and `K_row` on the stabilized normalized path, but make `V_row` come from the raw `x_current`, then update the design doc and rerun smoke tests.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/docs/dual_axis_full_architecture.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Changed `_residual_row_mix()` and `_attn_res_dual_axis_mix()` so row scores still use normalized keys, but row context aggregation now uses raw current-state values.
+  - Updated section 2 of the design report to state `K_row = x_norm` and `V_row = x_current`.
+- Rationale: This keeps the row-axis comparison path numerically stable without forcing the readout content itself through the same normalization; it matches the user’s intended “Q/K stabilized, V preserves original content” rule.
+- Key details: This change only affects the row branch value path; the repaired memory-value projection and no-duplicate depth candidate fixes remain in place.
+- Side effects: Both `dual_axis_full` and `dual_axis_full_no_final_mix` semantics changed again, so future experiments should be tagged against this revision.
+- Verification: `python -m py_compile src/layer_depth_attention/model.py` passed; local forward/backward smoke tests passed for `dual_axis_full` and `dual_axis_full_no_final_mix`, both with output shape `(2, 32, 128)` and parameter count `566528`.
+- Next step: Commit/push this final row-value-path adjustment and restart the active dual-axis experiment if the user wants metrics from this newest semantics.
+
+### [Step 020] - 2026-04-02 23:40 CST - Review Attention Residuals reference paper against in-repo comparator
+- Request: Inspect the project reference paper `refer/attres.pdf`, identify ideas worth borrowing, and assess whether the paper's method matches the in-repo `attn_residuals` comparator closely enough for fair comparison.
+- Plan: Extract the paper text, compare its key formulas and systems claims with the current implementation in `model.py`, then summarize reusable design choices and implementation mismatches.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Recorded the paper/code comparison results for future architecture and related-work positioning.
+- Rationale: The repository already uses `attn_residuals` as a comparator, but that implementation quality depends on how closely it matches the actual paper's algorithmic choices.
+- Key details:
+  - The paper defines AttnRes as depth-wise softmax attention over prior layer outputs using a per-layer learned pseudo-query vector, with RMSNorm applied on the key side and raw layer outputs used as values.
+  - The paper's practical large-scale variant is Block AttnRes, which attends over block summaries rather than every prior layer output.
+  - The current in-repo `attn_residuals` baseline matches the high-level idea of depth-wise learned aggregation, but differs from the paper in important ways: it repeatedly mixes `[embedding] + history` before each sublayer, keeps embedding permanently in the candidate pool, and does not implement the paper's blockwise variant or its two-phase inference path.
+  - Borrowable ideas include zero-initialized pseudo-queries, RMSNorm-on-score-side only, blockwise depth summaries, and explicit analysis of output/gradient magnitudes across depth.
+- Side effects: None on code yet; this is a literature-alignment checkpoint.
+- Verification: Read `refer/attres.pdf` via `pypdf` extraction and compared with `src/layer_depth_attention/model.py` around `_attn_res_mix`, `_attn_res_dual_axis_mix`, and residual-attention forward paths.
+- Next step: Use these findings either to tighten the `attn_residuals` comparator toward the paper or to clearly label it as an in-repo approximation in future experiment tables.
+
+### [Step 021] - 2026-04-02 23:52 CST - Clarify positional-identity risk in dual-axis design
+- Request: Research the concern that the mixed attention may not know the relative position of keys, especially along the vertical/depth axis, and assess whether latent attention is an appropriate fix.
+- Plan: Re-check the current dual-axis implementation and separate the issue into horizontal token-position information versus vertical depth-identity information, then record the conclusion in the design report.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/docs/dual_axis_full_architecture.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Expanded the design report's issue section to state that the real missing identity is mainly on the depth axis, while the row branch already has absolute token positions plus causal masking. Added guidance that lightweight depth embeddings or depth-relative bias should be tested before introducing heavier latent-attention machinery.
+- Rationale: The original note mixed two different concerns. In the current implementation, horizontal position information already exists indirectly, but vertical history slots still lack explicit layer/depth identity.
+- Key details:
+  - Row branch: `x_current` already contains token position embeddings and uses causal masking.
+  - Depth branch: stacked history slots do not carry explicit layer/depth IDs.
+  - Latent attention by itself would change compression/aggregation but would not automatically solve depth identity.
+- Side effects: None on code; this is a design-analysis clarification only.
+- Verification: Re-read `docs/dual_axis_full_architecture.md` and `src/layer_depth_attention/model.py` around `_attn_res_dual_axis_mix` and `DualAxisMemoryAttention`.
+- Next step: If desired, implement a minimal depth-embedding or depth-bias ablation instead of jumping directly to a latent-attention redesign.
+
+### [Step 022] - 2026-04-03 00:06 CST - Add no-position-embedding switch for baseline ablation
+- Request: Estimate how much performance is lost when a Transformer baseline has no position embedding, to gauge how much earlier dual-axis variants may have suffered from missing positional identity.
+- Plan: Add a minimal `use_pos_emb` switch to the text LM path, change nothing else, and compare a no-pos baseline against the existing same-config baseline.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/model.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext_lm.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification:
+  - Added `use_pos_emb: bool` to `TinyDecoderLM`.
+  - Made the token-position embedding addition conditional in `TinyDecoderLM.forward()`.
+  - Added `--use-pos-emb on|off` to the text training script.
+  - Added the position-embedding setting to the default output filename so no-pos runs do not overwrite existing baselines.
+- Rationale: This isolates exactly one factor—explicit token position embedding—without changing attention type, optimizer, or data pipeline.
+- Key details: When `--use-pos-emb off`, the model still keeps the embedding table parameter for shape compatibility, but the forward path skips adding `pos_emb(positions)`.
+- Side effects: Existing runs/configs remain valid because the new flag defaults to `on`.
+- Verification: Pending local smoke test and no-pos training run.
+- Next step: Run local compile/smoke tests, then launch a no-position baseline on the standard text benchmark.

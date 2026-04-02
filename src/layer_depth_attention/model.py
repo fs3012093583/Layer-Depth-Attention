@@ -696,10 +696,12 @@ class TinyDecoderLM(nn.Module):
         attn_residual: bool = True,
         ffn_residual: bool = True,
         tie_weights: bool = True,
+        use_pos_emb: bool = True,
     ) -> None:
         super().__init__()
         self.attention_type = attention_type
         self.num_heads = num_heads
+        self.use_pos_emb = use_pos_emb
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
         self.head_dim = d_model // num_heads
@@ -803,18 +805,19 @@ class TinyDecoderLM(nn.Module):
         return tensor.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
 
     def _residual_row_mix(self, current: torch.Tensor, row_q_proj: nn.Linear) -> torch.Tensor:
-        current = self._rms_norm_tensor(current)
-        q_row = self._split_heads(row_q_proj(current))
-        kv_row = self._split_heads(current)
+        current_norm = self._rms_norm_tensor(current)
+        q_row = self._split_heads(row_q_proj(current_norm))
+        row_keys = self._split_heads(current_norm)
+        row_values = self._split_heads(current)
         seq_len = current.size(1)
-        scores = torch.matmul(q_row, kv_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = torch.matmul(q_row, row_keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, device=current.device, dtype=torch.bool),
             diagonal=1,
         )
         scores = scores.masked_fill(causal_mask, float("-inf"))
         weights = torch.softmax(scores, dim=-1)
-        context = torch.matmul(weights, kv_row)
+        context = torch.matmul(weights, row_values)
         return self._merge_heads(context)
 
     def _attn_res_dual_axis_mix(
@@ -827,10 +830,11 @@ class TinyDecoderLM(nn.Module):
         current = history[-1] if history else embedding
         current_norm = self._rms_norm_tensor(current)
         q_row = self._split_heads(row_q_proj(current_norm))
-        row_values = self._split_heads(current_norm)
+        row_keys = self._split_heads(current_norm)
+        row_values = self._split_heads(current)
         seq_len = current.size(1)
 
-        row_scores = torch.matmul(q_row, row_values.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        row_scores = torch.matmul(q_row, row_keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, device=current.device, dtype=torch.bool),
             diagonal=1,
@@ -885,8 +889,12 @@ class TinyDecoderLM(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len = input_ids.shape
-        positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
-        x = self.token_emb(input_ids) + self.pos_emb(positions)
+        x = self.token_emb(input_ids)
+        if self.use_pos_emb:
+            positions = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
+            # Keep token-position information as an explicit switch so we can
+            # measure how much dual-axis or baseline models rely on it.
+            x = x + self.pos_emb(positions)
         if self.attention_type in {
             "attn_residuals",
             "attn_residuals_dual_axis",

@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mlp-ratio", type=int, default=4)
     parser.add_argument("--num-experts", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--use-pos-emb", choices=["on", "off"], default="on")
     parser.add_argument(
         "--attention-type",
         choices=[
@@ -235,11 +236,17 @@ def main() -> None:
         attn_residual=args.attn_residual == "on",
         ffn_residual=args.ffn_residual == "on",
         tie_weights=True,
+        use_pos_emb=args.use_pos_emb == "on",
     ).to(device)
     param_count = sum(param.numel() for param in model.parameters())
     print(f"model_params={param_count}")
 
-    output_name = args.output or f"artifacts/wikitext2_{args.attention_type}_{'attnres' if args.attn_residual == 'on' else 'noattnres'}_{'ffnres' if args.ffn_residual == 'on' else 'noffnres'}.json"
+    output_name = args.output or (
+        f"artifacts/wikitext2_{args.attention_type}_"
+        f"{'posemb' if args.use_pos_emb == 'on' else 'noposemb'}_"
+        f"{'attnres' if args.attn_residual == 'on' else 'noattnres'}_"
+        f"{'ffnres' if args.ffn_residual == 'on' else 'noffnres'}.json"
+    )
     output_path = ROOT / output_name
     output_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = output_path.parent / "checkpoints"
