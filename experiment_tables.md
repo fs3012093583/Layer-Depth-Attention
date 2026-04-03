@@ -56,3 +56,21 @@
 说明：
 - 在“大数据集 + 小模型 + 2000 step”这组更充分训练的设定下，`depth_memory_directkv_dualq` 明显优于 `baseline`。
 - 相比之前 `500 step` 的大设定结果，这说明 `directkv_dualq` 在完整 `WikiText-103` 上更依赖训练预算。
+
+## 4. 位置编码开关 8000 Step 对照表
+
+配置：
+- 数据集：`wikitext-103-probe`
+- 模型：`d_model=384`, `num_layers=16`, `num_heads=8`, `seq_len=256`
+- 训练：`batch_size=8`, `steps=8000`
+- 方法：`baseline`
+
+| 方法 | Step 400 Train Loss | Step 800 Train Loss | Step 1200 Train Loss | Step 1600 Train Loss | Step 2000 Train Loss | Step 4000 Train Loss | Step 6000 Train Loss | Step 8000 Train Loss | Final Val Loss | Final Val PPL | Final Test Loss | Final Test PPL |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `baseline (no pos)` | 9.9286 | 6.3295 | 4.4543 | 4.2543 | 3.4760 | 4.2837 | 2.8433 | 4.2900 | 3.2552 | 25.92 | 3.4262 | 30.76 |
+| `baseline (pos)` | 8.1426 | 5.3190 | 4.4937 | 4.4781 | 2.9861 | 3.7489 | 3.3264 | 3.7059 | 3.3095 | 27.37 | 3.5014 | 33.16 |
+
+说明：
+- 在 `8000 step` 的更长训练预算下，`baseline` 去掉 learned absolute position embedding 后仍然更好。
+- `no pos` 的 `best_test_ppl = 30.76`，优于 `pos` 的 `33.16`。
+- 这说明当前这套 learned absolute token position embedding 在这组文本配置里不是收益来源，至少不是主导收益来源。
