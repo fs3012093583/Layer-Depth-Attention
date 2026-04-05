@@ -24,20 +24,6 @@ import torch.nn as nn
 
 
 # ============================================================
-# 兼容旧版 PyTorch 的 RMSNorm（nn.RMSNorm 需要 PyTorch >= 2.4）
-# ============================================================
-class RMSNorm(nn.Module):
-    def __init__(self, d_model: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(d_model))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
-        return self.weight * (x / rms)
-
-
-# ============================================================
 # 基础组件
 # ============================================================
 
@@ -191,7 +177,7 @@ class AttnResModule(nn.Module):
         # ✅ 固定的伪向量：Linear(d, 1, bias=False) 的 weight 就是 w ∈ R^d
         self.pseudo_query = nn.Linear(d_model, 1, bias=False)
         # ✅ 对 K（历史层输出）做 RMSNorm，防止深层量级支配
-        self.norm = RMSNorm(d_model)  # 自定义实现，兼容旧版 PyTorch
+        self.norm = nn.LayerNorm(d_model)
 
     def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
         """
