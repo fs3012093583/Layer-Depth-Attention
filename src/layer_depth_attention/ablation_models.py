@@ -268,8 +268,11 @@ class TransformerBlock(nn.Module):
             current_kv = kv_attn
 
         mlp_out = self.mlp(self.mlp_norm(h))
-        # ✅ MLP 这步保留标准残差（块内累积）
-        x = x + mlp_out
+        if self.use_attn_residual:
+            # ✅ AttnRes 模式：不用标准残差，AttnRes 已经聚合了历史（含当前 x）
+            x = mlp_out
+        else:
+            x = x + mlp_out
         return x, current_kv
 
 
