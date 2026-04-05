@@ -161,47 +161,50 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
 
 
 # ============================================================
-# Kimi AttnRes：注意力残差替代标准残差连接
+# Kimi AttnRes：注意力残差替代标准残差连接（正确实现）
 # ============================================================
 
-class AttentionResidualBlock(nn.Module):
+class AttnResModule(nn.Module):
     """
-    Kimi Attention Residuals（AttnRes）：
-    用轻量注意力动态聚合所有历史层输出，替代传统固定权重的残差连接。
-    每层通过学习到的权重决定应该从哪些历史层汲取信息。
+    Kimi Attention Residuals（AttnRes）官方正确实现：
+    - 使用固定的可学习伪向量（pseudo-query），与当前输入无关
+    - 对历史层输出先做 RMSNorm，防止深层量级支配
+    - 在层维度做 Softmax，加权聚合所有历史层输出
+    参考：https://github.com/MoonshotAI/Attention-Residuals
     """
-    def __init__(self, d_model: int, num_heads: int = 4):
+    def __init__(self, d_model: int):
         super().__init__()
-        assert d_model % num_heads == 0
-        self.num_heads  = num_heads
-        self.head_dim   = d_model // num_heads
-        self.q_proj     = nn.Linear(d_model, d_model)
-        self.scale      = math.sqrt(self.head_dim)
+        # ✅ 固定的伪向量：Linear(d, 1, bias=False) 的 weight 就是 w ∈ R^d
+        self.pseudo_query = nn.Linear(d_model, 1, bias=False)
+        # ✅ 对 K（历史层输出）做 RMSNorm，防止深层量级支配
+        self.norm = nn.RMSNorm(d_model)
 
-    def forward(self, x_current: torch.Tensor, layer_history: list) -> torch.Tensor:
+    def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
         """
-        x_current    : 当前层处理后的特征 [B, S, D]
-        layer_history: 所有历史层输出的 List，每个元素 [B, S, D]
+        layer_history: 所有历史层输出的 List，每个 [B, S, D]
+        current:       当前块内的部分残差和 [B, S, D]
         """
         if not layer_history:
-            return x_current  # 第 0 层无历史，直接返回
+            return current
 
-        B, S, D = x_current.shape
-        past     = torch.stack(layer_history, dim=2)          # [B, S, L, D]
-        num_past = past.size(2)
+        # 把所有历史 + 当前 partial sum 叠在一起 [L+1, B, S, D]
+        V = torch.stack(layer_history + [current], dim=0)
+        # ✅ 先 RMSNorm 再打分
+        K = self.norm(V)
 
-        q = self.q_proj(x_current)                            # [B, S, D]
-        q = q.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)  # [B, H, S, d]
+        # ✅ 用伪向量做点积打分（不是对 x 做投影！）
+        # pseudo_query.weight: [1, D] → squeeze → [D]
+        logits = torch.einsum(
+            'd, l b s d -> l b s',
+            self.pseudo_query.weight.squeeze(0), K
+        )  # [L+1, B, S]
 
-        k = past.view(B, S, num_past, self.num_heads, self.head_dim)
-        k = k.permute(0, 3, 1, 2, 4)                          # [B, H, S, L, d]
+        # 在层维度（dim=0）做 Softmax
+        weights = logits.softmax(dim=0)  # [L+1, B, S]
 
-        scores  = (q.unsqueeze(3) * k).sum(dim=-1) / self.scale  # [B, H, S, L]
-        weights = torch.softmax(scores, dim=-1)
-
-        out = (weights.unsqueeze(-1) * k).sum(dim=3)          # [B, H, S, d]
-        out = out.transpose(1, 2).contiguous().view(B, S, D)  # [B, S, D]
-        return out
+        # 加权聚合
+        h = torch.einsum('l b s, l b s d -> b s d', weights, V)  # [B, S, D]
+        return h
 
 
 # ============================================================
@@ -218,7 +221,6 @@ class TransformerBlock(nn.Module):
         attention: nn.Module,
         shared_kv: SharedKVProjector = None,
         use_attn_residual: bool = False,
-        no_attn_res_skip: bool = False,   # 是否取消 attention 的残差连接（实验用）
     ):
         super().__init__()
         self.attn_norm = nn.LayerNorm(d_model)
@@ -230,29 +232,33 @@ class TransformerBlock(nn.Module):
             nn.Linear(mlp_ratio * d_model, d_model),
             nn.Dropout(dropout),
         )
-        self.shared_kv        = shared_kv
+        self.shared_kv         = shared_kv
         self.extract_sublayers = False
-        self.no_attn_res_skip  = no_attn_res_skip
-
-        # Kimi AttnRes 模式
         self.use_attn_residual = use_attn_residual
+
         if use_attn_residual:
-            self.attn_res = AttentionResidualBlock(d_model, num_heads=min(4, num_heads))
+            # ✅ Attention 前和 MLP 前各一个 AttnRes 模块（官方每个子层都有）
+            self.attn_res_attn = AttnResModule(d_model)
+            self.attn_res_mlp  = AttnResModule(d_model)
 
     def forward(self, x: torch.Tensor, past_kv=None, layer_history=None):
-        attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
+        if self.use_attn_residual and layer_history is not None:
+            # ✅ Attention 前：用 AttnRes 聚合历史层作为输入
+            h = self.attn_res_attn(layer_history, x)
+        else:
+            h = x
+
+        attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
+        # 块内仍然保留标准残差
+        x = x + attn_out
 
         if self.use_attn_residual and layer_history is not None:
-            # Kimi AttnRes：用注意力动态权重聚合所有历史层
-            x = self.attn_res(x + attn_out, layer_history)
-        elif self.no_attn_res_skip:
-            # 实验：完全跳过 attention 残差连接
-            x = attn_out
+            # ✅ MLP 前：再次用 AttnRes 聚合历史层
+            h = self.attn_res_mlp(layer_history, x)
         else:
-            # 标准残差
-            x = x + attn_out
+            h = x
 
-        # 亚层级记忆截点（FFN 前）
+        # 亚层级记忆截点（SubLayer 模式）
         if self.extract_sublayers and self.shared_kv is not None:
             norm_x = self.mlp_norm(x)
             k_ffn  = self.attn.split_heads(self.shared_kv.k_proj(norm_x))
@@ -261,7 +267,8 @@ class TransformerBlock(nn.Module):
         else:
             current_kv = kv_attn
 
-        x = x + self.mlp(self.mlp_norm(x))
+        mlp_out = self.mlp(self.mlp_norm(h))
+        x = x + mlp_out
         return x, current_kv
 
 
@@ -387,7 +394,7 @@ class TinyDecoderLM(nn.Module):
 
             elif self.attention_type == "attn_residual":
                 x, _ = block(x, past_kv=None, layer_history=layer_history)
-                layer_history.append(x.detach())  # 存入历史（detach 防止梯度爆链）
+                layer_history.append(x)  # ✅ 不 detach，让梯度正确回传
 
             else:
                 x, _ = block(x, past_kv=None)
