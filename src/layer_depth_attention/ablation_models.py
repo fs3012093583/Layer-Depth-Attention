@@ -192,14 +192,18 @@ class AttnResModule(nn.Module):
 
 class AttnResModule2D(nn.Module):
     """
-    横纵扙3D注意力残差：把所有层的所有 Token 位置都列为记忆库。
+    十字形（Cross）注意力残差：
+      - 纵向（右列）：所有层在当前 Token t 位置的表示（L+1 个 Key）← 等价于标准 AttnRes
+      - 横向（顶行）：最新一层在所有 s≤t 位置的表示（S 个 Key）←  新增横向感受野
 
-    与标准 AttnRes 的区别：
-      AttnRes  → 每个 Token 只回濙自身纵向历史（L 个 Key）
-      AttnRes2D→ 每个 Token 可回濙历史所有层的所有早于它的 Token（L×S 个 Key）
+    十字形 Key 总数：(L+1) + S - 1 = L+S 个（远少于全网格 L×S）
+    参数量与 AttnRes 完全相同：一个伪向量 + LayerNorm，不做额外投影。
 
-    参数量与 AttnRes 相同：一个伪向量 + LayerNorm。
-    V 和 K 直接用历史层输入，不做额外投影。
+         s1   s2   s3    t
+    L-1 │ ←   ←   ←   [x]   ← 顶行：最新层所有历史 Token
+    L-2 │              [↑]
+    L-3 │              [↑]   ← 右列：所有层当前 Token t
+     …  │              [↑]
     """
     def __init__(self, d_model: int):
         super().__init__()
@@ -211,36 +215,43 @@ class AttnResModule2D(nn.Module):
             return current
 
         B, S, D = current.shape
-        V = torch.stack(layer_history + [current], dim=0)  # [L+1, B, S_in, D]
-        K = self.norm(V)                                    # [L+1, B, S_in, D]
-        L_p1 = V.size(0)
+        w = self.pseudo_query.weight.squeeze(0)   # [D]
 
-        # 用伪向量对所有 (layer, position) 对打分
-        w = self.pseudo_query.weight.squeeze(0)             # [D]
-        scores_lbs = torch.einsum('d, l b s d -> l b s', w, K)  # [L+1, B, S_in]
+        # ── 纵向（右列）：所有层在位置 t 的表示 ──────────────────────
+        # V_col[l, b, t, :] = layer_history[l][b, t, :]
+        V_col = torch.stack(layer_history + [current], dim=0)  # [L+1, B, S, D]
+        K_col = self.norm(V_col)                                # [L+1, B, S, D]
+        # 只取每个位置 t 对应的列：einsum 沿层维度打分
+        scores_col = torch.einsum('d, l b s d -> b s l', w, K_col)  # [B, S, L+1]
 
-        # 展开到每个输出 Token 的视角: [B, S_out, L+1, S_in]
-        # scores 不依赖 S_out，不需要拷贝，用 expand 节省内存
-        scores_2d = scores_lbs.permute(1, 2, 0)            # [B, S_in, L+1]
-        scores_2d = scores_2d.unsqueeze(1).expand(B, S, S, L_p1)  # [B, S_out, S_in, L+1]
-        scores_2d = scores_2d.permute(0, 1, 3, 2)          # [B, S_out, L+1, S_in]
-
-        # 因果掩码: 输出 Token t 不能关注输入 s > t
+        # ── 横向（顶行）：最新层在所有 s≤t 位置的表示 ──────────────
+        # 最新层 = current（第 L 层输入）
+        K_row = self.norm(current)                              # [B, S_in, D]
+        scores_row = torch.einsum('d, b s d -> b s', w, K_row)  # [B, S_in]
+        # 扩展为每个输出 Token t 的视角：[B, S_out, S_in]
+        scores_row = scores_row.unsqueeze(1).expand(B, S, S)    # [B, S_out, S_in]
+        # 因果掩码：s_in > t 的位置不可见
         causal = torch.triu(
             torch.ones(S, S, dtype=torch.bool, device=current.device), diagonal=1
-        )                                                   # [S_out, S_in]
-        causal_4d = causal.unsqueeze(0).unsqueeze(2).expand(B, -1, L_p1, -1)
-        scores_2d = scores_2d.masked_fill(causal_4d, float('-inf'))
+        )
+        scores_row = scores_row.masked_fill(causal, float('-inf'))
 
-        # 展平 (L+1, S_in) 成一维，统一做 Softmax
-        scores_flat  = scores_2d.reshape(B, S, L_p1 * S)   # [B, S_out, (L+1)*S_in]
-        weights_flat = scores_flat.softmax(dim=-1)          # [B, S_out, (L+1)*S_in]
-        weights_2d   = weights_flat.reshape(B, S, L_p1, S) # [B, S_out, L+1, S_in]
+        # ── 拼接并统一 Softmax ─────────────────────────────────────
+        # col: [B, S_out, L+1]，row: [B, S_out, S_in]
+        # 拼接成 [B, S_out, L+1+S]，在最后一维统一 Softmax
+        scores_all  = torch.cat([scores_col, scores_row], dim=-1)  # [B, S, L+1+S]
+        weights_all = scores_all.softmax(dim=-1)                   # [B, S, L+1+S]
 
-        # 加权聚合: h[b,t,:] = Σ_{l,s<=t} w_{l,s} * V[l,b,s,:]
-        V_perm = V.permute(1, 0, 2, 3)                      # [B, L+1, S_in, D]
-        h = torch.einsum('b t l s, b l s d -> b t d', weights_2d, V_perm)
-        return h
+        w_col = weights_all[..., :V_col.size(0)]   # [B, S, L+1]
+        w_row = weights_all[..., V_col.size(0):]   # [B, S, S]
+
+        # 纵向聚合：Σ_l w_col[b,t,l] * V_col[l,b,t,:]
+        h_col = torch.einsum('b s l, l b s d -> b s d', w_col, V_col)   # [B, S, D]
+
+        # 横向聚合：Σ_{s_in≤t} w_row[b,t,s_in] * current[b,s_in,:]
+        h_row = torch.einsum('b t s, b s d -> b t d', w_row, current)   # [B, S, D]
+
+        return h_col + h_row
 
 
 # ============================================================
