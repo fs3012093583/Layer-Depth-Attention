@@ -190,68 +190,102 @@ class AttnResModule(nn.Module):
         return torch.einsum('l b s, l b s d -> b s d', weights, V)
 
 
+class SharedCrossQProj(nn.Module):
+    """
+    全模型共享的多头 Q 投影（attn_residual_2d 专用）。
+    Q 由当前位置输入投影得到（input-dependent），增强表达力；
+    所有层共享同一个矩阵，避免参数量随层数线性增长。
+    额外参数：D×D（共享一次）+ D（LayerNorm 各层各一份）。
+    """
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        assert d_model % num_heads == 0
+        self.num_heads = num_heads
+        self.head_dim  = d_model // num_heads
+        self.scale     = math.sqrt(self.head_dim)
+        self.q_proj    = nn.Linear(d_model, d_model, bias=False)
+
+    def project(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, S, D] → [B, H, S, head_dim]"""
+        B, S, _ = x.shape
+        return (
+            self.q_proj(x)
+            .view(B, S, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+
+
 class AttnResModule2D(nn.Module):
     """
-    十字形（Cross）注意力残差：
-      - 纵向（右列）：所有层在当前 Token t 位置的表示（L+1 个 Key）← 等价于标准 AttnRes
-      - 横向（顶行）：最新一层在所有 s≤t 位置的表示（S 个 Key）←  新增横向感受野
+    十字形多头注意力残差（改进版）：
 
-    十字形 Key 总数：(L+1) + S - 1 = L+S 个（远少于全网格 L×S）
-    参数量与 AttnRes 完全相同：一个伪向量 + LayerNorm，不做额外投影。
+      Q: 由当前层输入投影（input-dependent），所有层共享同一个 SharedCrossQProj
+      K: LayerNorm(历史层输入)，无额外投影
+      V: 历史层输入，无额外投影
 
-         s1   s2   s3    t
-    L-1 │ ←   ←   ←   [x]   ← 顶行：最新层所有历史 Token
-    L-2 │              [↑]
-    L-3 │              [↑]   ← 右列：所有层当前 Token t
-     …  │              [↑]
+      感受野（十字形）：
+           s1   s2   s3    t
+      L-1 │ ←   ←   ←   [x]  ← 顶行：当前层所有位置 s≤t（横向）
+      L-2 │              [↑]
+      L-3 │              [↑]  ← 右列：所有层在位置 t（纵向）
+       …  │              [↑]
+
+      Key 总数：L+S（远小于全矩形 L×S）
     """
-    def __init__(self, d_model: int):
+    def __init__(self, d_model: int, shared_q: SharedCrossQProj):
         super().__init__()
-        self.pseudo_query = nn.Linear(d_model, 1, bias=False)
-        self.norm = nn.LayerNorm(d_model)
+        self.shared_q = shared_q
+        self.norm     = nn.LayerNorm(d_model)
 
     def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
         if not layer_history:
             return current
 
         B, S, D = current.shape
-        w = self.pseudo_query.weight.squeeze(0)   # [D]
+        H, d    = self.shared_q.num_heads, self.shared_q.head_dim
+        scale   = self.shared_q.scale
 
-        # ── 纵向（右列）：所有层在位置 t 的表示 ──────────────────────
-        # V_col[l, b, t, :] = layer_history[l][b, t, :]
-        V_col = torch.stack(layer_history + [current], dim=0)  # [L+1, B, S, D]
-        K_col = self.norm(V_col)                                # [L+1, B, S, D]
-        # 只取每个位置 t 对应的列：einsum 沿层维度打分
-        scores_col = torch.einsum('d, l b s d -> b s l', w, K_col)  # [B, S, L+1]
+        # Q 由当前输入投影：[B, H, S_out, d]
+        Q = self.shared_q.project(current)
 
-        # ── 横向（顶行）：最新层在所有 s≤t 位置的表示 ──────────────
-        # 最新层 = current（第 L 层输入）
-        K_row = self.norm(current)                              # [B, S_in, D]
-        scores_row = torch.einsum('d, b s d -> b s', w, K_row)  # [B, S_in]
-        # 扩展为每个输出 Token t 的视角：[B, S_out, S_in]
-        scores_row = scores_row.unsqueeze(1).expand(B, S, S)    # [B, S_out, S_in]
-        # 因果掩码：s_in > t 的位置不可见
+        # ── 纵向（右列）：所有层在位置 t ──────────────────────────────
+        V_col   = torch.stack(layer_history + [current], dim=0)    # [L+1, B, S, D]
+        K_col   = self.norm(V_col)                                  # [L+1, B, S, D]
+        L_p1    = V_col.size(0)
+        # 分头：[L+1, B, H, S, d]
+        K_col_h = K_col.view(L_p1, B, S, H, d).permute(0, 1, 3, 2, 4)
+        V_col_h = V_col.view(L_p1, B, S, H, d).permute(0, 1, 3, 2, 4)
+        # Q[b,h,t,d] · K_col[l,b,h,t,d] → [B, H, S, L+1]
+        scores_col = torch.einsum(
+            'b h t d, l b h t d -> b h t l', Q, K_col_h
+        ) / scale
+
+        # ── 横向（顶行）：当前层所有位置 s≤t ─────────────────────────
+        K_row_h = self.norm(current).view(B, S, H, d).transpose(1, 2)  # [B, H, S_in, d]
+        V_row_h = current.view(B, S, H, d).transpose(1, 2)             # [B, H, S_in, d]
+        # Q[b,h,t,d] · K_row[b,h,s,d] → [B, H, S_out, S_in]
+        scores_row = torch.einsum(
+            'b h t d, b h s d -> b h t s', Q, K_row_h
+        ) / scale
+        # 因果掩码
         causal = torch.triu(
             torch.ones(S, S, dtype=torch.bool, device=current.device), diagonal=1
         )
         scores_row = scores_row.masked_fill(causal, float('-inf'))
 
-        # ── 拼接并统一 Softmax ─────────────────────────────────────
-        # col: [B, S_out, L+1]，row: [B, S_out, S_in]
-        # 拼接成 [B, S_out, L+1+S]，在最后一维统一 Softmax
-        scores_all  = torch.cat([scores_col, scores_row], dim=-1)  # [B, S, L+1+S]
-        weights_all = scores_all.softmax(dim=-1)                   # [B, S, L+1+S]
+        # ── 拼接 + 统一 Softmax over [L+1 col + S row] ──────────────
+        scores_all  = torch.cat([scores_col, scores_row], dim=-1)  # [B, H, S, L+1+S]
+        weights_all = scores_all.softmax(dim=-1)
+        w_col = weights_all[..., :L_p1]   # [B, H, S, L+1]
+        w_row = weights_all[..., L_p1:]   # [B, H, S, S]
 
-        w_col = weights_all[..., :V_col.size(0)]   # [B, S, L+1]
-        w_row = weights_all[..., V_col.size(0):]   # [B, S, S]
+        # 纵向聚合：Σ_l w_col * V_col[l,b,h,t,:]
+        h_col = torch.einsum('b h t l, l b h t d -> b h t d', w_col, V_col_h)  # [B, H, S, d]
+        # 横向聚合：Σ_s w_row * V_row[b,h,s,:]
+        h_row = torch.einsum('b h t s, b h s d -> b h t d', w_row, V_row_h)    # [B, H, S, d]
 
-        # 纵向聚合：Σ_l w_col[b,t,l] * V_col[l,b,t,:]
-        h_col = torch.einsum('b s l, l b s d -> b s d', w_col, V_col)   # [B, S, D]
-
-        # 横向聚合：Σ_{s_in≤t} w_row[b,t,s_in] * current[b,s_in,:]
-        h_row = torch.einsum('b t s, b s d -> b t d', w_row, current)   # [B, S, D]
-
-        return h_col + h_row
+        # 合并多头：[B, S, D]
+        return (h_col + h_row).transpose(1, 2).contiguous().view(B, S, D)
 
 
 # ============================================================
@@ -268,7 +302,7 @@ class TransformerBlock(nn.Module):
         attention: nn.Module,
         shared_kv: SharedKVProjector = None,
         use_attn_residual: bool = False,
-        use_attn_residual_2d: bool = False,
+        shared_cross_q: SharedCrossQProj = None,   # attn_residual_2d 专用
     ):
         super().__init__()
         self.attn_norm = nn.LayerNorm(d_model)
@@ -283,14 +317,15 @@ class TransformerBlock(nn.Module):
         self.shared_kv         = shared_kv
         self.extract_sublayers = False
         self.use_attn_residual    = use_attn_residual
-        self.use_attn_residual_2d = use_attn_residual_2d
+        self.use_attn_residual_2d = shared_cross_q is not None
 
         if use_attn_residual:
             self.attn_res_attn = AttnResModule(d_model)
             self.attn_res_mlp  = AttnResModule(d_model)
-        elif use_attn_residual_2d:
-            self.attn_res_attn = AttnResModule2D(d_model)
-            self.attn_res_mlp  = AttnResModule2D(d_model)
+        elif shared_cross_q is not None:
+            # 所有层共享同一个 SharedCrossQProj，各自有独立的 LayerNorm
+            self.attn_res_attn = AttnResModule2D(d_model, shared_cross_q)
+            self.attn_res_mlp  = AttnResModule2D(d_model, shared_cross_q)
 
     def forward(self, x: torch.Tensor, past_kv=None, layer_history=None):
         use_ar = (self.use_attn_residual or self.use_attn_residual_2d) and layer_history is not None
@@ -370,11 +405,19 @@ class TinyDecoderLM(nn.Module):
         self.dropout    = nn.Dropout(dropout)
 
         shared_kv = SharedKVProjector(d_model) if attention_type in self.SHARED_KV_TYPES else None
+        # attn_residual_2d：全模型共享一个 Q 投影，所有层传入同一个对象
+        shared_cross_q = (
+            SharedCrossQProj(d_model, num_heads)
+            if attention_type == "attn_residual_2d" else None
+        )
+        if shared_cross_q is not None:
+            self.shared_cross_q = shared_cross_q  # 注册为子模块，参与参数追踪
 
         self.blocks = nn.ModuleList()
         for _ in range(num_layers):
             block = self._build_block(
-                attention_type, d_model, num_heads, mlp_ratio, dropout, shared_kv
+                attention_type, d_model, num_heads, mlp_ratio, dropout,
+                shared_kv, shared_cross_q
             )
             self.blocks.append(block)
 
@@ -382,7 +425,8 @@ class TinyDecoderLM(nn.Module):
         if tie_weights:
             self.lm_head.weight = self.token_emb.weight
 
-    def _build_block(self, attention_type, d_model, num_heads, mlp_ratio, dropout, shared_kv):
+    def _build_block(self, attention_type, d_model, num_heads, mlp_ratio, dropout,
+                     shared_kv, shared_cross_q=None):
         if attention_type == "baseline":
             attn  = BaselineAttention(d_model, num_heads, dropout)
             block = TransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
@@ -408,11 +452,11 @@ class TinyDecoderLM(nn.Module):
             )
 
         elif attention_type == "attn_residual_2d":
-            # 横纵扙2D AttnRes：所有层的所有 Token 作为记忆库
+            # 十字形多头注意力残差：Q 由输入投影，所有层共享同一个 SharedCrossQProj
             attn  = BaselineAttention(d_model, num_heads, dropout)
             block = TransformerBlock(
                 d_model, num_heads, mlp_ratio, dropout, attn,
-                use_attn_residual_2d=True
+                shared_cross_q=shared_cross_q
             )
         else:
             raise ValueError(f"未知的 attention_type: {attention_type!r}")
