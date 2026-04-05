@@ -243,17 +243,17 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, past_kv=None, layer_history=None):
         if self.use_attn_residual and layer_history is not None:
-            # ✅ Attention 前：用 AttnRes 聚合历史层作为输入
+            # AttnRes 前：聚合历史层作为 Attention 的输入
             h = self.attn_res_attn(layer_history, x)
+            attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
+            # ✅ 官方做法：块边界时不用标准残差，AttnRes 本身就是残差路径
+            x = attn_out
         else:
-            h = x
-
-        attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
-        # 块内仍然保留标准残差
-        x = x + attn_out
+            attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
+            x = x + attn_out  # 标准残差（非 AttnRes 模式）
 
         if self.use_attn_residual and layer_history is not None:
-            # ✅ MLP 前：再次用 AttnRes 聚合历史层
+            # AttnRes 前：聚合历史层作为 MLP 的输入
             h = self.attn_res_mlp(layer_history, x)
         else:
             h = x
@@ -268,6 +268,7 @@ class TransformerBlock(nn.Module):
             current_kv = kv_attn
 
         mlp_out = self.mlp(self.mlp_norm(h))
+        # ✅ MLP 这步保留标准残差（块内累积）
         x = x + mlp_out
         return x, current_kv
 
