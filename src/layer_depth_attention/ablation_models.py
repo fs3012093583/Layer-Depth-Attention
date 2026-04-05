@@ -338,11 +338,14 @@ class TransformerBlock(nn.Module):
             attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
             x = x + attn_out
 
-        h = self.attn_res_mlp(layer_history, x) if use_ar else x
+        # x_mid = FFN 前的中间状态，深度历史库将同时存储这两个状态
+        x_mid = x
+
+        h = self.attn_res_mlp(layer_history, x_mid) if use_ar else x_mid
 
         # 亚层级记忆截点（SubLayer 模式）
         if self.extract_sublayers and self.shared_kv is not None:
-            norm_x = self.mlp_norm(x)
+            norm_x = self.mlp_norm(x_mid)
             k_ffn  = self.attn.split_heads(self.shared_kv.k_proj(norm_x))
             v_ffn  = self.attn.split_heads(self.shared_kv.v_proj(norm_x))
             current_kv = [kv_attn, (k_ffn, v_ffn)]
@@ -350,11 +353,14 @@ class TransformerBlock(nn.Module):
             current_kv = kv_attn
 
         mlp_out = self.mlp(self.mlp_norm(h))
-        if self.use_attn_residual:
-            # ✅ AttnRes 模式：不用标准残差，AttnRes 已经聚合了历史（含当前 x）
-            x = mlp_out
+        if self.use_attn_residual or self.use_attn_residual_2d:
+            x = mlp_out   # 无残差
         else:
             x = x + mlp_out
+
+        # attn_residual_2d 额外返回 x_mid，供上层将 FFN 输入也存入历史库
+        if self.use_attn_residual_2d:
+            return x, current_kv, x_mid
         return x, current_kv
 
 
@@ -494,9 +500,16 @@ class TinyDecoderLM(nn.Module):
                 x, current_kvs = block(x, past_kv=past_kv)
                 past_kv.extend(current_kvs)   # 把 [kv_attn, kv_ffn] 全部展开
 
-            elif self.attention_type in {"attn_residual", "attn_residual_2d"}:
+            elif self.attention_type == "attn_residual":
                 x, _ = block(x, past_kv=None, layer_history=layer_history)
                 layer_history.append(x)
+
+            elif self.attention_type == "attn_residual_2d":
+                # 返回三元组：(x_final, kv, x_mid)
+                # 将 x_mid（FFN 输入）和 x（块最终输出）都存入历史，深度伸展到 2L
+                x, _, x_mid = block(x, past_kv=None, layer_history=layer_history)
+                layer_history.append(x_mid)   # Attention 后、FFN 前的中间状态
+                layer_history.append(x)        # FFN 后的最终状态
 
             else:
                 x, _ = block(x, past_kv=None)
