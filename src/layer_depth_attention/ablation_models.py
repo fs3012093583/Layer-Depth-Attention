@@ -116,7 +116,7 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
         self.k_row_proj = nn.Linear(d_model, d_model)
         self.v_row_proj = nn.Linear(d_model, d_model)
         # Memory 级别：Q 独立，K/V 提取逻辑全局共享
-        self.q_col_proj = nn.Linear(d_model, d_model)
+        # self.q_col_proj = nn.Linear(d_model, d_model)
         self.shared_memory_kv = shared_kv
 
     def forward(
@@ -128,7 +128,8 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
         k_row = self.split_heads(self.k_row_proj(x))
         v_row = self.split_heads(self.v_row_proj(x))
 
-        q_col = self.split_heads(self.q_col_proj(x))
+        # q_col = self.split_heads(self.q_col_proj(x))
+        q_col = q_row
         k_col = self.split_heads(self.shared_memory_kv.k_proj(x))
         v_col = self.split_heads(self.shared_memory_kv.v_proj(x))
 
