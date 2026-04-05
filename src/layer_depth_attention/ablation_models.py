@@ -225,12 +225,15 @@ class AttnResModule2D(nn.Module):
 
       感受野（十字形）：
            s1   s2   s3    t
-      L-1 │ ←   ←   ←   [x]  ← 顶行：当前层所有位置 s≤t（横向）
+      L-1 │ ←   ←   ←   [x]  ← 顶行：当前层所有位置 s≤t（横向，S 个 Key）
       L-2 │              [↑]
       L-3 │              [↑]  ← 右列：所有层在位置 t（纵向）
-       …  │              [↑]
+       …  │              [↑]     每层存 x_mid + x 共 2 个状态 → 2L 个 Key
 
-      Key 总数：L+S（远小于全矩形 L×S）
+      Key 总数：2L + S
+        - 纵向右列：2L 个（每层贡献 x_mid 和 x 两个亚层状态）
+        - 横向顶行：S 个（当前层所有 s≤t 位置，带因果掩码）
+        - 对比标准 AttnRes（纵向）：L 个
     """
     def __init__(self, d_model: int, shared_q: SharedCrossQProj):
         super().__init__()
