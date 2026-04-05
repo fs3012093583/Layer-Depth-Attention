@@ -334,16 +334,24 @@ class TransformerBlock(nn.Module):
         use_ar = (self.use_attn_residual or self.use_attn_residual_2d) and layer_history is not None
 
         if use_ar:
-            h = self.attn_res_attn(layer_history, x)
+            # Bug 2 修复：layer_history[-1] 就是 x（上一个 block 的输出），
+            # 不能再把 current=x 塞进去，否则历史里会重复计入。
+            # 把 layer_history 拆成 history_before（不含 x）和 current（= x）。
+            if layer_history:
+                hist_for_attn, cur_for_attn = layer_history[:-1], layer_history[-1]
+            else:
+                hist_for_attn, cur_for_attn = [], x
+            h = self.attn_res_attn(hist_for_attn, cur_for_attn)
             attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
-            x = attn_out   # 无残差
+            x = attn_out          # Attention 无标准残差（AttnRes 替代了跨层残差）
         else:
             attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
             x = x + attn_out
 
-        # x_mid = FFN 前的中间状态，深度历史库将同时存储这两个状态
+        # x_mid = Attention 输出 / FFN 输入
         x_mid = x
 
+        # attn_res_mlp：x_mid 是新状态，不在 layer_history 里，直接传入不重复
         h = self.attn_res_mlp(layer_history, x_mid) if use_ar else x_mid
 
         # 亚层级记忆截点（SubLayer 模式）
@@ -357,14 +365,17 @@ class TransformerBlock(nn.Module):
 
         mlp_out = self.mlp(self.mlp_norm(h))
         if self.use_attn_residual or self.use_attn_residual_2d:
-            x = mlp_out   # 无残差
+            # Bug 1 修复：官方 AttnRes 在块边界时，MLP 输出加在 attn_out 上，
+            # 不是完全无残差。对应 partial_block = partial_block + mlp_out
+            # 其中 partial_block = attn_out = x_mid。
+            x = x_mid + mlp_out
         else:
             x = x + mlp_out
 
-        # attn_residual_2d 额外返回 x_mid，供上层将 FFN 输入也存入历史库
         if self.use_attn_residual_2d:
             return x, current_kv, x_mid
         return x, current_kv
+
 
 
 # ============================================================
