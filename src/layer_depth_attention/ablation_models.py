@@ -168,42 +168,78 @@ class AttnResModule(nn.Module):
     """
     Kimi Attention Residuals（AttnRes）官方正确实现：
     - 使用固定的可学习伪向量（pseudo-query），与当前输入无关
-    - 对历史层输出先做 RMSNorm，防止深层量级支配
+    - 对历史层输出先做 LayerNorm，防止深层量级支配
     - 在层维度做 Softmax，加权聚合所有历史层输出
     参考：https://github.com/MoonshotAI/Attention-Residuals
     """
     def __init__(self, d_model: int):
         super().__init__()
-        # ✅ 固定的伪向量：Linear(d, 1, bias=False) 的 weight 就是 w ∈ R^d
         self.pseudo_query = nn.Linear(d_model, 1, bias=False)
-        # ✅ 对 K（历史层输出）做 RMSNorm，防止深层量级支配
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
-        """
-        layer_history: 所有历史层输出的 List，每个 [B, S, D]
-        current:       当前块内的部分残差和 [B, S, D]
-        """
         if not layer_history:
             return current
-
-        # 把所有历史 + 当前 partial sum 叠在一起 [L+1, B, S, D]
-        V = torch.stack(layer_history + [current], dim=0)
-        # ✅ 先 RMSNorm 再打分
+        V = torch.stack(layer_history + [current], dim=0)   # [L+1, B, S, D]
         K = self.norm(V)
-
-        # ✅ 用伪向量做点积打分（不是对 x 做投影！）
-        # pseudo_query.weight: [1, D] → squeeze → [D]
         logits = torch.einsum(
             'd, l b s d -> l b s',
             self.pseudo_query.weight.squeeze(0), K
-        )  # [L+1, B, S]
+        )                                                    # [L+1, B, S]
+        weights = logits.softmax(dim=0)                      # softmax 层维度
+        return torch.einsum('l b s, l b s d -> b s d', weights, V)
 
-        # 在层维度（dim=0）做 Softmax
-        weights = logits.softmax(dim=0)  # [L+1, B, S]
 
-        # 加权聚合
-        h = torch.einsum('l b s, l b s d -> b s d', weights, V)  # [B, S, D]
+class AttnResModule2D(nn.Module):
+    """
+    横纵扙3D注意力残差：把所有层的所有 Token 位置都列为记忆库。
+
+    与标准 AttnRes 的区别：
+      AttnRes  → 每个 Token 只回濙自身纵向历史（L 个 Key）
+      AttnRes2D→ 每个 Token 可回濙历史所有层的所有早于它的 Token（L×S 个 Key）
+
+    参数量与 AttnRes 相同：一个伪向量 + LayerNorm。
+    V 和 K 直接用历史层输入，不做额外投影。
+    """
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.pseudo_query = nn.Linear(d_model, 1, bias=False)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
+        if not layer_history:
+            return current
+
+        B, S, D = current.shape
+        V = torch.stack(layer_history + [current], dim=0)  # [L+1, B, S_in, D]
+        K = self.norm(V)                                    # [L+1, B, S_in, D]
+        L_p1 = V.size(0)
+
+        # 用伪向量对所有 (layer, position) 对打分
+        w = self.pseudo_query.weight.squeeze(0)             # [D]
+        scores_lbs = torch.einsum('d, l b s d -> l b s', w, K)  # [L+1, B, S_in]
+
+        # 展开到每个输出 Token 的视角: [B, S_out, L+1, S_in]
+        # scores 不依赖 S_out，不需要拷贝，用 expand 节省内存
+        scores_2d = scores_lbs.permute(1, 2, 0)            # [B, S_in, L+1]
+        scores_2d = scores_2d.unsqueeze(1).expand(B, S, S, L_p1)  # [B, S_out, S_in, L+1]
+        scores_2d = scores_2d.permute(0, 1, 3, 2)          # [B, S_out, L+1, S_in]
+
+        # 因果掩码: 输出 Token t 不能关注输入 s > t
+        causal = torch.triu(
+            torch.ones(S, S, dtype=torch.bool, device=current.device), diagonal=1
+        )                                                   # [S_out, S_in]
+        causal_4d = causal.unsqueeze(0).unsqueeze(2).expand(B, -1, L_p1, -1)
+        scores_2d = scores_2d.masked_fill(causal_4d, float('-inf'))
+
+        # 展平 (L+1, S_in) 成一维，统一做 Softmax
+        scores_flat  = scores_2d.reshape(B, S, L_p1 * S)   # [B, S_out, (L+1)*S_in]
+        weights_flat = scores_flat.softmax(dim=-1)          # [B, S_out, (L+1)*S_in]
+        weights_2d   = weights_flat.reshape(B, S, L_p1, S) # [B, S_out, L+1, S_in]
+
+        # 加权聚合: h[b,t,:] = Σ_{l,s<=t} w_{l,s} * V[l,b,s,:]
+        V_perm = V.permute(1, 0, 2, 3)                      # [B, L+1, S_in, D]
+        h = torch.einsum('b t l s, b l s d -> b t d', weights_2d, V_perm)
         return h
 
 
@@ -221,6 +257,7 @@ class TransformerBlock(nn.Module):
         attention: nn.Module,
         shared_kv: SharedKVProjector = None,
         use_attn_residual: bool = False,
+        use_attn_residual_2d: bool = False,
     ):
         super().__init__()
         self.attn_norm = nn.LayerNorm(d_model)
@@ -234,29 +271,28 @@ class TransformerBlock(nn.Module):
         )
         self.shared_kv         = shared_kv
         self.extract_sublayers = False
-        self.use_attn_residual = use_attn_residual
+        self.use_attn_residual    = use_attn_residual
+        self.use_attn_residual_2d = use_attn_residual_2d
 
         if use_attn_residual:
-            # ✅ Attention 前和 MLP 前各一个 AttnRes 模块（官方每个子层都有）
             self.attn_res_attn = AttnResModule(d_model)
             self.attn_res_mlp  = AttnResModule(d_model)
+        elif use_attn_residual_2d:
+            self.attn_res_attn = AttnResModule2D(d_model)
+            self.attn_res_mlp  = AttnResModule2D(d_model)
 
     def forward(self, x: torch.Tensor, past_kv=None, layer_history=None):
-        if self.use_attn_residual and layer_history is not None:
-            # AttnRes 前：聚合历史层作为 Attention 的输入
+        use_ar = (self.use_attn_residual or self.use_attn_residual_2d) and layer_history is not None
+
+        if use_ar:
             h = self.attn_res_attn(layer_history, x)
             attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
-            # ✅ 官方做法：块边界时不用标准残差，AttnRes 本身就是残差路径
-            x = attn_out
+            x = attn_out   # 无残差
         else:
             attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
-            x = x + attn_out  # 标准残差（非 AttnRes 模式）
+            x = x + attn_out
 
-        if self.use_attn_residual and layer_history is not None:
-            # AttnRes 前：聚合历史层作为 MLP 的输入
-            h = self.attn_res_mlp(layer_history, x)
-        else:
-            h = x
+        h = self.attn_res_mlp(layer_history, x) if use_ar else x
 
         # 亚层级记忆截点（SubLayer 模式）
         if self.extract_sublayers and self.shared_kv is not None:
@@ -354,11 +390,18 @@ class TinyDecoderLM(nn.Module):
             block.extract_sublayers = True
 
         elif attention_type == "attn_residual":
-            # Kimi AttnRes：Baseline 注意力 + 注意力残差替代标准残差
             attn  = BaselineAttention(d_model, num_heads, dropout)
             block = TransformerBlock(
                 d_model, num_heads, mlp_ratio, dropout, attn,
                 use_attn_residual=True
+            )
+
+        elif attention_type == "attn_residual_2d":
+            # 横纵扙2D AttnRes：所有层的所有 Token 作为记忆库
+            attn  = BaselineAttention(d_model, num_heads, dropout)
+            block = TransformerBlock(
+                d_model, num_heads, mlp_ratio, dropout, attn,
+                use_attn_residual_2d=True
             )
         else:
             raise ValueError(f"未知的 attention_type: {attention_type!r}")
@@ -396,9 +439,9 @@ class TinyDecoderLM(nn.Module):
                 x, current_kvs = block(x, past_kv=past_kv)
                 past_kv.extend(current_kvs)   # 把 [kv_attn, kv_ffn] 全部展开
 
-            elif self.attention_type == "attn_residual":
+            elif self.attention_type in {"attn_residual", "attn_residual_2d"}:
                 x, _ = block(x, past_kv=None, layer_history=layer_history)
-                layer_history.append(x)  # ✅ 不 detach，让梯度正确回传
+                layer_history.append(x)
 
             else:
                 x, _ = block(x, past_kv=None)
