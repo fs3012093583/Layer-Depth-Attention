@@ -108,8 +108,10 @@ print("device =", DEVICE, "num_gpus =", NUM_GPUS)
 
 CFG = {
     # 数据
+    "data_source": "local_text",  # "local_text" or "hf"
+    "local_data_dir": "/kaggle/input/wikitext2-raw",
     "dataset_name": "wikitext",
-    "dataset_config": "wikitext-2-raw-v1",   # 也可改成 wikitext-103-raw-v1
+    "dataset_config": "wikitext-2-raw-v1",   # 仅在 data_source="hf" 时使用
     "text_field": "text",
     "tokenizer_name": "gpt2",
     "add_eos_between_lines": True,
@@ -160,6 +162,8 @@ print(json.dumps(CFG, indent=2, ensure_ascii=False))
         code_cell(
             """@dataclass
 class LMCfg:
+    data_source: str
+    local_data_dir: str
     dataset_name: str
     dataset_config: str
     text_field: str
@@ -175,7 +179,10 @@ class LMData:
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.vocab_size = self.tokenizer.vocab_size
         self.pad_token_id = self.tokenizer.eos_token_id
-        self.dataset = load_dataset(cfg.dataset_name, cfg.dataset_config)
+        self.dataset = None
+        self.local_data_dir = Path(cfg.local_data_dir)
+        if cfg.data_source == "hf":
+            self.dataset = load_dataset(cfg.dataset_name, cfg.dataset_config)
         self.splits = self._tokenize_all_splits()
         self.eval_windows = {
             split: self._build_eval_windows(self.splits[split])
@@ -184,8 +191,12 @@ class LMData:
         self.eval_cursors = {"validation": 0, "test": 0}
 
     def _join_text(self, split_name: str) -> str:
-        texts = self.dataset[split_name][self.cfg.text_field]
-        text = "\\n".join(texts)
+        if self.cfg.data_source == "local_text":
+            text_path = self.local_data_dir / f"{split_name}.txt"
+            text = text_path.read_text(encoding="utf-8")
+        else:
+            texts = self.dataset[split_name][self.cfg.text_field]
+            text = "\\n".join(texts)
         if self.cfg.add_eos_between_lines:
             eos = self.tokenizer.eos_token
             text = text.replace("\\n", f" {eos} ")
@@ -254,6 +265,8 @@ class LMData:
 
 data = LMData(
     LMCfg(
+        data_source=CFG["data_source"],
+        local_data_dir=CFG["local_data_dir"],
         dataset_name=CFG["dataset_name"],
         dataset_config=CFG["dataset_config"],
         text_field=CFG["text_field"],
