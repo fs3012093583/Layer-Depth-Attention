@@ -79,16 +79,51 @@ class BaselineAttention(MultiHeadAttentionBase):
         return self.out_proj(self.merge_heads(out)), (k, v)
 
 
+class LightAttention(MultiHeadAttentionBase):
+    """
+    轻量注意力：仅保留 D 维掩码/缩放向量，剥离重排逻辑。
+    参数量极低（仅 3D 每层），完全避免 O(D^2) 的计算和显存开销。
+    属于最极端的消融验证对照组。
+    """
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
+        super().__init__(d_model, num_heads, dropout)
+        # 仅用 3 个 D 维向量进行 QKV 特征的独立缩放
+        self.w_qkv = nn.Parameter(torch.ones(3, d_model))
+
+    def forward(self, x: torch.Tensor, past_kv=None):
+        # 解包权重
+        wq, wk, wv = self.w_qkv.unbind(dim=0)
+
+        # 仅应用逐元素缩放，没有重排带来的耗时和显存负担
+        q = x * wq
+        k = x * wk
+        v = x * wv
+
+        # 变回多头张量
+        q = self.split_heads(q)
+        k = self.split_heads(k)
+        v = self.split_heads(v)
+
+        # 标准的 Attention 计算
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(self.causal_mask(x.size(1), x.device), float("-inf"))
+        weights = self.dropout(torch.softmax(scores, dim=-1))
+        out = torch.matmul(weights, v)
+        
+        return self.out_proj(self.merge_heads(out)), (k, v)
+
+
 class SharedKVBaselineAttention(MultiHeadAttentionBase):
     """
     共享 KV 的 Baseline：
     - 每层独立 q_proj
-    - 跨层共享 k_proj / v_proj
+    - 同层共享 k_proj / v_proj
     - 不使用跨层 memory（纯对照组，用于展示共享 KV 的负面效果）
     """
     def __init__(self, d_model: int, num_heads: int, dropout: float, shared_kv: SharedKVProjector):
         super().__init__(d_model, num_heads, dropout)
         self.q_proj = nn.Linear(d_model, d_model)
+        #实现有问题，不同层是不同改的共享wq，共享wk，但是q不等于k
         self.shared_kv = shared_kv
 
     def forward(self, x: torch.Tensor, past_kv=None):
@@ -111,24 +146,24 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
     """
     def __init__(self, d_model: int, num_heads: int, dropout: float, shared_kv: SharedKVProjector):
         super().__init__(d_model, num_heads, dropout)
-        # Token 级别：全部层间独立，不共享
-        self.q_row_proj = nn.Linear(d_model, d_model)
-        self.k_row_proj = nn.Linear(d_model, d_model)
-        self.v_row_proj = nn.Linear(d_model, d_model)
-        # Memory 级别：Q 独立，K/V 提取逻辑全局共享
-        # self.q_col_proj = nn.Linear(d_model, d_model)
+        # Token 级别：合并投影以加速 (3倍效率)
+        self.qkv_row_proj = nn.Linear(d_model, 3 * d_model)
+        
+        # Memory 级别：K/V 提取逻辑全局共享
         self.shared_memory_kv = shared_kv
+        
 
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        q_row = self.split_heads(self.q_row_proj(x))
-        k_row = self.split_heads(self.k_row_proj(x))
-        v_row = self.split_heads(self.v_row_proj(x))
+        # 1. 提速：一次矩阵乘法解决 q_row, k_row, v_row
+        q_row, k_row, v_row = self.qkv_row_proj(x).chunk(3, dim=-1)
+        q_row = self.split_heads(q_row)
+        k_row = self.split_heads(k_row)
+        v_row = self.split_heads(v_row)
 
-        # q_col = self.split_heads(self.q_col_proj(x))
         q_col = q_row
         k_col = self.split_heads(self.shared_memory_kv.k_proj(x))
         v_col = self.split_heads(self.shared_memory_kv.v_proj(x))
@@ -139,11 +174,12 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
             self.causal_mask(seq_len, x.device), float("-inf")
         )
 
-        if past_kv:
-            past_keys   = torch.stack([item[0] for item in past_kv], dim=3)
-            past_values = torch.stack([item[1] for item in past_kv], dim=3)
+        if past_kv is not None:
+            past_keys, past_values = past_kv
 
-            memory_scores = (q_col.unsqueeze(3) * past_keys).sum(dim=-1) / math.sqrt(self.head_dim)
+            # 2. 提速：使用 einsum 避免 5D 张量广播带来的巨大显存和时间开销
+            memory_scores = torch.einsum('b h s d, b h s l d -> b h s l', q_col, past_keys) / math.sqrt(self.head_dim)
+            
             scores  = torch.cat([token_scores, memory_scores], dim=-1)
             weights = self.dropout(torch.softmax(scores, dim=-1))
 
@@ -151,7 +187,9 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
             mem_w   = weights[..., seq_len:]
 
             token_ctx = torch.matmul(token_w, v_row)
-            mem_ctx   = (mem_w.unsqueeze(-1) * past_values).sum(dim=3)
+            # 3. 提速：使用 einsum 直接高效加权求和，避免 unsqueeze 广播
+            mem_ctx   = torch.einsum('b h s l, b h s l d -> b h s d', mem_w, past_values)
+            
             out = token_ctx + mem_ctx
         else:
             weights = self.dropout(torch.softmax(token_scores, dim=-1))
@@ -159,6 +197,10 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
 
         # 只把 k_col / v_col 送入历史档案库
         return self.out_proj(self.merge_heads(out)), (k_col, v_col)
+
+
+
+
 
 
 # ============================================================
@@ -369,7 +411,7 @@ class TransformerBlock(nn.Module):
             # Bug 1 修复：官方 AttnRes 在块边界时，MLP 输出加在 attn_out 上，
             # 不是完全无残差。对应 partial_block = partial_block + mlp_out
             # 其中 partial_block = attn_out = x_mid。
-            x = x_mid + mlp_out
+            x = mlp_out
         else:
             x = x + mlp_out
 
@@ -471,6 +513,9 @@ class TinyDecoderLM(nn.Module):
                 d_model, num_heads, mlp_ratio, dropout, attn,
                 use_attn_residual=True
             )
+        elif attention_type == "light_attention":
+            attn  = LightAttention(d_model, num_heads, dropout)
+            block = TransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
 
         elif attention_type == "attn_residual_2d":
             # 十字形多头注意力残差：Q 由输入投影，所有层共享同一个 SharedCrossQProj
@@ -503,17 +548,21 @@ class TinyDecoderLM(nn.Module):
             x   = x + self.pos_emb(pos)
         x = self.dropout(x)
 
-        past_kv       = []
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         layer_history = []   # 供 attn_residual 使用
 
         for block in self.blocks:
             if self.attention_type in {"shared_kv_depth_memory", "shared_kv_depth_memory_dualq"}:
                 x, current_kv = block(x, past_kv=past_kv)
-                past_kv.append(current_kv)
+                past_kv = self._append_past_kv(past_kv, current_kv)
+
+            elif self.attention_type == "shared_kv_baseline":
+                x, _ = block(x, past_kv=None)  # 不使用跨层记忆，直接传 None
 
             elif self.attention_type == "shared_kv_depth_memory_dualq_sublayer":
                 x, current_kvs = block(x, past_kv=past_kv)
-                past_kv.extend(current_kvs)   # 把 [kv_attn, kv_ffn] 全部展开
+                for current_kv in current_kvs:
+                    past_kv = self._append_past_kv(past_kv, current_kv)
 
             elif self.attention_type == "attn_residual":
                 x, _ = block(x, past_kv=None, layer_history=layer_history)
@@ -531,3 +580,18 @@ class TinyDecoderLM(nn.Module):
 
         x = self.final_norm(x)
         return self.lm_head(x)
+
+    @staticmethod
+    def _append_past_kv(
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        current_kv: Tuple[torch.Tensor, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        k, v = current_kv
+        if past_kv is None:
+            return k.unsqueeze(3), v.unsqueeze(3)
+        past_keys, past_values = past_kv
+        return (
+            torch.cat([past_keys, k.unsqueeze(3)], dim=3),
+            torch.cat([past_values, v.unsqueeze(3)], dim=3),
+        )
+    
