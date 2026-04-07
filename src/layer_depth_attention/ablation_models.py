@@ -9,7 +9,8 @@ Layer-Depth-Attention 消融实验模型库
   - shared_kv_depth_memory_dualq          : 双轴注意力（行独立 + 列共享记忆）
   - shared_kv_depth_memory_dualq_sublayer : 双轴 + 亚层级记忆（FFN 前截点分离）
   - attn_residual                         : Kimi AttnRes（注意力替代残差连接）
-
+  - light_attention                       : 轻量注意力（仅 D 维缩放向量，无重排）
+  - light_attention_kfromrow               : 使用聚合后的行特征作为 K 的轻量注意力（仅 D 维缩放向量，无重排）  
 用法（在 Notebook 中引用）：
   import sys
   sys.path.insert(0, "/path/to/Layer-Depth-Attention/src")
@@ -69,7 +70,7 @@ class BaselineAttention(MultiHeadAttentionBase):
         super().__init__(d_model, num_heads, dropout)
         self.qkv_proj = nn.Linear(d_model, 3 * d_model)
 
-    def forward(self, x: torch.Tensor, past_kv=None):
+    def forward(self, x: torch.Tensor, past_kv=None, past_x=None):
         q, k, v = self.qkv_proj(x).chunk(3, dim=-1)
         q, k, v = self.split_heads(q), self.split_heads(k), self.split_heads(v)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -89,13 +90,17 @@ class LightAttention(MultiHeadAttentionBase):
         super().__init__(d_model, num_heads, dropout)
         # 仅用 3 个 D 维向量进行 QKV 特征的独立缩放
         self.w_qkv = nn.Parameter(torch.ones(3, d_model))
+        
 
-    def forward(self, x: torch.Tensor, past_kv=None):
+    def forward(self, x: torch.Tensor, past_kv=None,past_x = None):
         # 解包权重
         wq, wk, wv = self.w_qkv.unbind(dim=0)
 
         # 仅应用逐元素缩放，没有重排带来的耗时和显存负担
-        q = x * wq
+        if past_x is not None:
+            q = past_x * wq
+        else:
+            q = x * wq
         k = x * wk
         v = x * wv
 
@@ -113,6 +118,11 @@ class LightAttention(MultiHeadAttentionBase):
         return self.out_proj(self.merge_heads(out)), (k, v)
 
 
+# class AgregateQ(MultiHeadAttentionBase):
+
+
+
+
 class SharedKVBaselineAttention(MultiHeadAttentionBase):
     """
     共享 KV 的 Baseline：
@@ -126,7 +136,7 @@ class SharedKVBaselineAttention(MultiHeadAttentionBase):
         #实现有问题，不同层是不同改的共享wq，共享wk，但是q不等于k
         self.shared_kv = shared_kv
 
-    def forward(self, x: torch.Tensor, past_kv=None):
+    def forward(self, x: torch.Tensor, past_kv=None, past_x=None):
         q = self.split_heads(self.q_proj(x))
         k = self.split_heads(self.shared_kv.k_proj(x))
         v = self.split_heads(self.shared_kv.v_proj(x))
@@ -157,6 +167,7 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
         self,
         x: torch.Tensor,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_x: Optional[torch.Tensor] = None,
     ):
         # 1. 提速：一次矩阵乘法解决 q_row, k_row, v_row
         q_row, k_row, v_row = self.qkv_row_proj(x).chunk(3, dim=-1)
@@ -167,6 +178,9 @@ class SharedKVDepthMemoryDualQAttention(MultiHeadAttentionBase):
         q_col = q_row
         k_col = self.split_heads(self.shared_memory_kv.k_proj(x))
         v_col = self.split_heads(self.shared_memory_kv.v_proj(x))
+        # 直接使用原始输入 x 计算 k_col 和 v_col，避免重复投影带来的开销
+        # k_col = self.split_heads(x)
+        # v_col = self.split_heads(x)
 
         seq_len = x.size(1)
         token_scores = torch.matmul(q_row, k_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -225,10 +239,16 @@ class AttnResModule(nn.Module):
             return current
         V = torch.stack(layer_history + [current], dim=0)   # [L+1, B, S, D]
         K = self.norm(V)
+
+        # 1. 可学习向量与当前输入做逐元素对应相乘，得到 input-dependent 的 Query
+        # Q = self.pseudo_query.weight.squeeze(0) * current    # [B, S, D]
+        Q = current
+
+        # 2. 让这个新的 Query 去和历史的 K 算点积来查询，并除以 sqrt(D) 进行缩放
         logits = torch.einsum(
-            'd, l b s d -> l b s',
-            self.pseudo_query.weight.squeeze(0), K
-        )                                                    # [L+1, B, S]
+            'b s d, l b s d -> l b s',
+            Q, K
+        ) / math.sqrt(current.size(-1))                      # [L+1, B, S]
         weights = logits.softmax(dim=0)                      # softmax 层维度
         return torch.einsum('l b s, l b s d -> b s d', weights, V)
 
@@ -373,8 +393,10 @@ class TransformerBlock(nn.Module):
             self.attn_res_attn = AttnResModule2D(d_model, shared_cross_q)
             self.attn_res_mlp  = AttnResModule2D(d_model, shared_cross_q)
 
-    def forward(self, x: torch.Tensor, past_kv=None, layer_history=None):
+    def forward(self, x: torch.Tensor, past_kv=None, layer_history=None, past_x=None):
         use_ar = (self.use_attn_residual or self.use_attn_residual_2d) and layer_history is not None
+        
+        current_input_x = x.clone()
 
         if use_ar:
             # Bug 2 修复：layer_history[-1] 就是 x（上一个 block 的输出），
@@ -385,10 +407,10 @@ class TransformerBlock(nn.Module):
             else:
                 hist_for_attn, cur_for_attn = [], x
             h = self.attn_res_attn(hist_for_attn, cur_for_attn)
-            attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv)
+            attn_out, kv_attn = self.attn(self.attn_norm(h), past_kv=past_kv, past_x=past_x)
             x = attn_out          # Attention 无标准残差（AttnRes 替代了跨层残差）
         else:
-            attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
+            attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv, past_x=past_x)
             x = x + attn_out
 
         # x_mid = Attention 输出 / FFN 输入
@@ -417,7 +439,8 @@ class TransformerBlock(nn.Module):
 
         if self.use_attn_residual_2d:
             return x, current_kv, x_mid
-        return x, current_kv
+        
+        return x, current_kv, current_input_x
 
 
 
@@ -551,32 +574,34 @@ class TinyDecoderLM(nn.Module):
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
         layer_history = []   # 供 attn_residual 使用
 
+
+        past_x = None        # 第一层的上一层输入为 None
+
         for block in self.blocks:
             if self.attention_type in {"shared_kv_depth_memory", "shared_kv_depth_memory_dualq"}:
-                x, current_kv = block(x, past_kv=past_kv)
+                x, current_kv, past_x = block(x, past_kv=past_kv, past_x=past_x)
                 past_kv = self._append_past_kv(past_kv, current_kv)
 
             elif self.attention_type == "shared_kv_baseline":
-                x, _ = block(x, past_kv=None)  # 不使用跨层记忆，直接传 None
+                x, _, past_x = block(x, past_kv=None, past_x=past_x)
 
             elif self.attention_type == "shared_kv_depth_memory_dualq_sublayer":
-                x, current_kvs = block(x, past_kv=past_kv)
+                x, current_kvs, past_x = block(x, past_kv=past_kv, past_x=past_x)
                 for current_kv in current_kvs:
                     past_kv = self._append_past_kv(past_kv, current_kv)
 
             elif self.attention_type == "attn_residual":
-                x, _ = block(x, past_kv=None, layer_history=layer_history)
+                x, _, past_x = block(x, past_kv=None, layer_history=layer_history, past_x=past_x)
                 layer_history.append(x)
 
             elif self.attention_type == "attn_residual_2d":
-                # 返回三元组：(x_final, kv, x_mid)
-                # 将 x_mid（FFN 输入）和 x（块最终输出）都存入历史，深度伸展到 2L
-                x, _, x_mid = block(x, past_kv=None, layer_history=layer_history)
-                layer_history.append(x_mid)   # Attention 后、FFN 前的中间状态
-                layer_history.append(x)        # FFN 后的最终状态
+                x, _, x_mid = block(x, past_kv=None, layer_history=layer_history, past_x=past_x)
+                layer_history.append(x_mid)
+                layer_history.append(x)
+                past_x = x
 
             else:
-                x, _ = block(x, past_kv=None)
+                x, _, past_x = block(x, past_kv=None, past_x=past_x)
 
         x = self.final_norm(x)
         return self.lm_head(x)

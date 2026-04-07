@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from transformers import GPT2Tokenizer
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from layer_depth_attention.ablation_models import TinyDecoderLM
 
