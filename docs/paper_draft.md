@@ -1,109 +1,390 @@
-# Layer-Depth Attention: Toward Depth-Aware Memory Routing in Decoder-Only Transformers
+# Layer-Depth Memory Routing for Decoder-Only Transformers
 
-## 摘要
+## Draft Status
 
-本文研究一种面向解码器式 Transformer 的跨层记忆注意力机制。标准自注意力只在当前层的 token 维度上进行交互，而我们希望让每个 token 在当前层计算时，除了访问同层前缀上下文，还能访问该 token 在前面各层形成的深度历史。基于这一动机，我们整理并实现了 Layer-Depth Memory Attention 及其若干投影对齐变体，并在合成关联回忆、WikiText-2 语言建模和 CIFAR100 小型视觉分类任务上进行比较。实验表明，朴素的跨层记忆读取并不会稳定优于标准基线，但将历史表示重投影到当前层注意力空间后，性能会更加稳定；其中 `value_reproj_normed` 在非残差聚合类方法中表现最佳。在更难的合成任务上，该类方法能改善早期收敛；但在当前 WikiText-2 主配置下，最强对照仍然是 Attention Residuals。以上结果说明，深度维信息本身是有价值的，但其有效利用依赖于合理的表征对齐与路由设计。
+This file is the **mother draft** for both:
 
-## 1. 引言
+- a **submission version** with a narrower main story and tighter evidence
+- an **arXiv version** with fuller appendices, extra curves, and more ablation details
 
-Transformer 的成功主要建立在 token 维度上的内容交互机制之上。对于解码器式语言模型而言，因果自注意力允许当前位置读取前缀 token 的上下文，但当前层通常无法显式回看“同一 token 在前面各层已经形成过哪些中间表征”。这带来一个自然问题：如果把同一 token 的跨层历史也作为可检索记忆，模型能否更好地进行逐层推理和表征修正？
+The current final method assumed in this draft is:
 
-围绕这一问题，我们从一个尽量小改动的原则出发，构建了一条从标准 causal self-attention 到 depth-aware attention 的方法线。核心思想是：对第 `i` 层第 `k` 个 token 来说，注意力空间不再只包含当前层可见前缀 token，还额外包含该 token 在第 `1` 到 `i-1` 层留下的历史记忆。这样，注意力从纯 token 空间扩展为 token-depth 联合空间。
+- **single-q**
+- **sublayer memory**
+- **projected K/V**
 
-不过，直接把历史 `K/V` 暴露给当前层查询并不一定有效，因为不同层的表示空间并不天然对齐。基于这一观察，我们进一步研究把历史 value 先恢复到模型空间、再使用当前层投影进行重映射的 `value_reproj` 路线，并在此基础上引入归一化与双查询等变体。实验结果支持如下判断：深度记忆不是“加上去就会变强”的免费增益，真正重要的是当前层查询与历史表征之间的空间对齐方式。
+That is, the model uses one query for both row-token attention and depth-memory lookup, stores sublayer-level history, and archives historical memory using projected K/V rather than raw hidden states.
 
-本文的贡献可以概括为三点。第一，我们提出并实现了一套 Layer-Depth Memory Attention 变体，用统一视角分析“跨层同位记忆”如何进入解码器注意力。第二，我们在合成任务、语言建模和视觉分类三类 setting 中系统比较了朴素记忆读取、重投影、归一化和双查询设计。第三，我们得到一个更克制但更可信的结论：深度维历史是潜在有效的信息源，但需要经过适当的重投影与路由机制；在当前文本主 benchmark 上，该方向尚未超过更强的残差聚合类对照。
+---
 
-## 2. 方法
+## 1. Working Title Options
 
-### 2.1 Layer-Depth Memory Attention
+### Option A
+**Layer-Depth Memory Routing for Decoder-Only Transformers**
 
-设模型共有 `L` 层，序列长度为 `n`，第 `i` 层第 `k` 个 token 的隐藏状态记为 `x_k^{(i)}`。标准多头自注意力中，查询 `q_k^{(i)}` 只能对当前层的 key/value 做加权聚合。本文的基础方法则为每个 token 维护一条跨层历史，将其在前面各层的表示视为同位深度记忆。
+### Option B
+**Single-Query Layer-Depth Memory for Decoder-Only Language Models**
 
-因此，对第 `i` 层第 `k` 个 token 而言，扩展后的注意力库由两部分组成：
+### Option C
+**Improving Decoder-Only Transformers with Layer-Depth Memory Routing**
 
-1. 当前层所有可见 token 的 `K/V`
-2. 同一 token 在前 `i-1` 层留下的历史记忆
+Recommended current choice:
 
-在因果约束下，当前层 token 仍然只能读取前缀位置，而深度记忆默认可见，因为它们不包含未来 token 信息。于是，每个查询的注意力空间大小由标准的 `n` 扩展为 `n + i - 1`。
+> **Layer-Depth Memory Routing for Decoder-Only Transformers**
 
-### 2.2 Projection Alignment Variants
+This is broad enough for both the submission version and the arXiv version, while still matching the current experimental scope.
 
-基础 `depth_memory` 直接把历史 `K/V` 拼接到当前层注意力空间中。实现和实验都表明，这种做法的增益并不稳定。我们认为主要原因在于：不同层的表示和当前层查询不处于同一几何空间，直接匹配会削弱记忆利用效率。
+---
 
-为此，我们采用一条更稳定的实现路线：把历史 value 先拼回模型空间，再通过当前层的投影路径重新映射到当前层的 key/value 空间。基于这一思想，得到以下几类变体：
+## 2. Abstract Draft
 
-- `depth_memory_value_reproj`：对历史 value 做当前层重投影。
-- `depth_memory_value_reproj_normed`：在重投影前先归一化历史 value。
-- `depth_memory_qkv_reproj`：将历史 `Q/K/V` 都作为记忆候选再映射。
-- `depth_memory_value_reproj_dualq`：对同层前缀检索和同列历史检索使用不同查询。
+Decoder-only Transformers propagate information effectively along the token dimension, but access to intermediate representations formed at earlier layers remains indirect. We study whether a token at the current layer can benefit from directly reading its own depth history, rather than relying only on residual propagation through the stack. To this end, we introduce a layer-depth memory routing mechanism that augments standard causal self-attention with a same-position cross-layer memory branch. Our final design uses a single shared query for row-wise token attention and depth-wise memory retrieval, stores sublayer-level history, and archives historical states through projected keys and values. Across multiple WikiText-103 settings, including 8-layer and 16-layer models, different sequence lengths, and long training budgets, the proposed method consistently improves perplexity over strong Transformer baselines by roughly 2% to 4%. These results suggest that depth history is a useful information source even for already strong decoder baselines, but also reveal a clear efficiency trade-off: the current prototype incurs higher runtime cost than standard self-attention. Overall, the results position layer-depth memory routing as a stable and promising direction for improving decoder-only language models, while leaving memory-path optimization as an important future step.
 
-这些变体的共同目标都是减少跨层表征失配，使当前层能够更有效地读取深度记忆。
+---
 
-### 2.3 当前论文主线的定位
+## 3. One-Paragraph Paper Positioning
 
-从现有结果看，最值得作为论文主线的方法不是最朴素的 `depth_memory`，而是带对齐设计的 `value_reproj_normed`。因此本文建议采用“两层叙事”：
+This paper should be positioned as a **mechanism paper with stable but moderate gains**, not as a sweeping replacement for standard Transformer attention.
 
-1. 先给出基础 Layer-Depth Memory Attention 的概念与数学定义。
-2. 再说明仅有“记忆接入”还不够，必须解决跨层空间不对齐问题，而 `value_reproj_normed` 是当前最稳健的实现。
+The main claim should be:
 
-## 3. 实验设置
+> A decoder-only Transformer can benefit from explicitly reading same-token cross-layer history, and a single-query, sublayer-level, projected-K/V memory design yields stable perplexity improvements across multiple settings.
 
-### 3.1 合成关联回忆
+The paper should **not** claim:
 
-我们首先使用轻量级 associative recall 任务验证方法是否具备基本可学习性。在简单设置下，标准基线和 `depth_memory` 都能快速收敛到接近完美精度，因此该任务更适合用来排除明显无效设计，而不是支持强主张。随后我们提高模型规模和任务难度，在 `d_model=256`、`num_layers=8`、`num_heads=8`、`num_pairs=20` 的配置下比较不同方法的样本效率与最终表现。
+- that the method dominates all possible alternatives
+- that the method is already fully optimized in runtime
+- that the gains are large in absolute terms
 
-### 3.2 WikiText-2 语言建模
+Instead, the honest and credible framing is:
 
-主文本 benchmark 采用 WikiText-2 小规模解码器式语言建模设置。当前整理出的 2000-step 主配置包含：`d_model=384`、`num_layers=16`、`num_heads=8`、`seq_len=256`、`batch_size=8`。所有方法在尽量一致的训练预算下比较验证集和测试集 perplexity。该部分实验主要用于判断 depth-aware 设计在真实文本建模中是否具有稳定收益。
+- the gains are **small-to-moderate but stable**
+- the effect persists across depth and training budget
+- the efficiency gap is real, but current runtime appears worse than the pure theoretical complexity gap, suggesting implementation overhead still matters
 
-### 3.3 CIFAR100 视觉探针
+---
 
-为了观察该设计是否能迁移到非文本场景，我们还在 CIFAR100 上构建了一个小型 ViT 探针实验。当前设置使用 `patch_size=4`、`d_model=256`、`num_layers=6`、`num_heads=8`。这一部分实验更偏向可迁移性探索，而不是最终主结论来源。
+## 4. Introduction Draft
 
-## 4. 实验结果
+Transformer language models are built around token-wise attention, where each layer reads contextual information from other positions in the sequence. This design has proved extremely successful, but it leaves a separate source of information only indirectly accessible: the intermediate representations that the same token has formed across previous layers. In standard decoder-only Transformers, such depth information can only reach later layers through repeated residual propagation. The model therefore has no explicit mechanism for saying: *for this token, retrieve what earlier layers already computed at the same position*.
 
-### 4.1 合成任务说明深度记忆可以帮助早期收敛
+This observation motivates a simple question: can a decoder-only language model improve by augmenting token attention with a direct layer-depth memory branch? If the current token could jointly attend to both the usual row-wise prefix context and its own cross-layer history, then the model might reuse partially refined intermediate states more effectively instead of repeatedly reconstructing them through the stack.
 
-在更难的 associative recall 配置下，`depth_memory` 在 `400` step 时达到 `eval_acc=0.6250`，明显高于同配置基线的 `0.3391`。这表明当任务确实需要更强的中间记忆能力时，跨层同位记忆可以改善优化过程和早期性能。
+In this work, we study this question through a controlled family of cross-layer memory mechanisms for decoder-only Transformers. Our final design uses a single query to route both row-wise token attention and depth-wise memory retrieval, stores memory at the sublayer level, and archives historical states through projected keys and values. The resulting mechanism extends each attention step from pure token interaction to a joint token-depth routing problem.
 
-但当训练预算继续增大到 `1500` step 后，基线也能收敛到 `1.0000` 精度，说明该优势更多体现为早期样本效率，而不是最终能力差距。与此同时，去掉 FFN residual 会让训练明显崩坏，说明稳定的残差路径仍然是这类模型可训练性的关键组成部分。
+The resulting gains are not dramatic, but they are stable. Across multiple WikiText-103 settings, including 8-layer and 16-layer models, different sequence lengths, and long training budgets, the proposed method consistently improves perplexity over strong Transformer baselines by roughly 2% to 4%. At the same time, the method introduces nontrivial runtime overhead, and the measured slowdown is larger than the pure theoretical compute gap, indicating that the current prototype implementation is not yet fully optimized.
 
-### 4.2 文本主 benchmark 上，对齐比“直接加记忆”更重要
+These results support a restrained but meaningful conclusion: explicit depth-history access is useful for decoder-only language modeling, and it can yield repeatable improvements even on already strong baselines. However, the method should currently be viewed as a promising architectural direction rather than a fully optimized replacement for standard self-attention.
 
-WikiText-2 的 2000-step 结果显示，最朴素的 `depth_memory` 仅比 `baseline` 略有变化，无法形成稳定优势；而使用历史 value 重投影的变体整体更可靠。以测试集 perplexity 为例：
+### Contributions
 
-- `baseline`: `69.14`
-- `depth_memory`: `68.89`
-- `depth_memory_value_reproj`: `66.67`
-- `depth_memory_value_reproj_normed`: `66.26`
+The current paper should claim the following contributions:
 
-这组结果支持一个核心判断：真正有帮助的不是“把深度记忆塞进注意力”本身，而是让历史表征经过当前层空间的再对齐。尤其是 `value_reproj_normed`，在当前非残差聚合路线中给出了最稳定的文本收益。
+1. We formulate decoder-only attention as a **joint row-depth routing problem**, where the current token can read both prefix tokens and its own cross-layer history.
+2. We introduce a practical final design based on **single-query routing, sublayer memory, and projected historical K/V**, and show that this combination gives the most stable results among the tested variants.
+3. We show on WikiText-103 that the method yields **consistent 2% to 4% perplexity improvements** across multiple settings, including 8-layer and 16-layer models and different sequence lengths.
+4. We analyze the method’s cost and show that while the theoretical extra compute is moderate, the current prototype incurs additional systems-level overhead, highlighting an important optimization direction for future work.
 
-### 4.3 当前最强对照仍然是 Attention Residuals
+---
 
-需要强调的是，当前文本主配置下整体表现最好的方法并不是本文提出的 depth-memory 路线，而是 `Attention Residuals`。其测试集 perplexity 为 `60.62`，显著好于 `depth_memory_value_reproj_normed` 的 `66.26`。这意味着如果论文要保持可信度，就不能把结论写成“本文方法已经全面优于现有结构”；更合理的表述应是：本文验证了深度记忆方向的可行性，并识别出“投影对齐”这一关键因素，但在当前 benchmark 上它仍弱于更强的残差聚合对照。
+## 5. Method Draft
 
-### 4.4 视觉探针尚未显示明显收益
+### 5.1 Problem Setup
 
-在 CIFAR100 的短程和 50 epoch 设置下，`depth_memory_value_reproj_normed` 都没有超过标准 ViT 基线。例如在 50 epoch 配置中，基线测试精度为 `0.5216`，对应 depth-memory 变体为 `0.5145`。这说明当前设计还不能直接迁移为更强的视觉模块，其有效性至少在现阶段更偏向于特定的语言建模或记忆型任务。
+Consider a decoder-only Transformer with `L` layers. At layer `l`, the hidden state at token position `t` is denoted by `x_t^(l)`. Standard causal self-attention allows `x_t^(l)` to read row-wise context from the prefix positions `{1, ..., t}` in the same layer. However, it does not explicitly expose the cross-layer history `{x_t^(1), ..., x_t^(l-1)}` for direct retrieval.
 
-## 5. 讨论
+We aim to augment standard self-attention with a depth-memory branch that allows the current token to retrieve same-position information formed at previous layers.
 
-本文目前最重要的经验不是“depth memory 一定有效”，而是“depth memory 只有在表征对齐良好时才可能有效”。朴素做法效果不稳，说明跨层历史虽然携带信息，但这些信息的坐标系随层数变化，不能假设当前层查询可以直接读取。
+### 5.2 Row Attention and Depth Memory
 
-另一个重要观察是，实验叙事必须区分“早期收敛优势”和“最终性能优势”。在合成任务中，depth memory 的价值更接近样本效率提升；在真实文本 benchmark 上，它则更像是一个仍待打磨的结构方向，而非已经成熟的替代主干。
+For each layer, we keep the usual row-wise token attention branch over the current sequence. In parallel, we maintain a depth-memory archive consisting of same-position history from earlier layers or sublayers. The current token then produces a single query that is used for two routing decisions:
 
-因此，论文定位更适合写成一篇机制探索型工作：它提出一种有明确动机的 depth-aware attention 家族，给出若干能工作的对齐实现，并通过跨任务实验指出该方向的有效条件和现实边界。
+- row-wise routing over current-layer prefix tokens
+- depth-wise routing over same-position historical memory
 
-## 6. 结论
+The row branch and depth branch produce scores that are concatenated and normalized jointly, so the model allocates attention mass across both sources within one competition space.
 
-本文探索了在解码器式 Transformer 中引入同 token 跨层历史记忆的可能性。实验表明，单纯加入深度记忆并不能稳定提升性能，但通过对历史 value 做当前层重投影并配合归一化，可以在合成任务和文本建模中获得更可信的增益。与此同时，当前结果也清楚表明，这一路线尚未超过更强的残差聚合类方法。后续工作应继续研究更强的跨层空间对齐、记忆筛选与双轴路由机制，并在更长训练和更大 benchmark 上重新评估其上限。
+### 5.3 Final Design Used in This Paper
 
-## 7. 后续补写清单
+The final method used in the current draft has three defining design choices.
 
-- 补齐 Related Work，并对比 cross-layer attention、residual mixing、memory Transformer 等方向。
-- 将 `method_layer_depth_memory_attention.md` 中的数学公式整理为正式论文符号系统。
-- 把 WikiText-2 与 CIFAR100 的实验表格改写为论文表格格式。
-- 决定是否把 `dual_axis_*` 系列作为扩展章节或第二阶段论文主线。
-- 增加局限性描述，明确当前方法尚未超过 `Attention Residuals`。
+#### Single-Q
+
+The same query representation is used for both row attention and depth-memory lookup. This avoids introducing an additional query branch and gives a simpler routing mechanism than dual-query variants.
+
+#### Sublayer Memory
+
+Instead of storing only one memory item per Transformer block, we cache history at the sublayer level. In the current implementation, this means that attention-side and FFN-side intermediate states can both contribute memory entries. This produces a richer depth archive than block-only storage.
+
+#### Projected K/V
+
+Historical memory is archived through projected keys and values rather than leaving it in raw hidden-state form. This gives the current layer a learned memory space for matching and aggregation, and empirically performs more stably than removing projection entirely.
+
+### 5.4 Why This Combination
+
+The current experimental evidence suggests the following:
+
+- **single-q** is simpler and sufficient for stable gains
+- **sublayer memory** improves the usefulness of the depth archive relative to coarser block-only memory
+- **projected K/V** performs more reliably than directly using raw hidden states as memory keys and values
+
+This is why the final paper should treat **single-q + sublayer + projected K/V** as the main method, and treat the other variants as supporting ablations rather than separate primary methods.
+
+---
+
+## 6. Experiments Section Plan
+
+### 6.1 Benchmark
+
+The main benchmark should be positioned as:
+
+- **WikiText-103**
+- **BPE tokenizer**
+- decoder-only language modeling
+
+The paper should explicitly note that perplexity values are tokenizer-dependent, so cross-paper absolute comparisons are only meaningful when tokenizer and evaluation protocol are sufficiently aligned.
+
+### 6.2 Main Result Axes Already Available
+
+The current result pool already supports a coherent main-experiment story:
+
+- `8-layer`, `seq_len=256`, `40000` and `80000` steps
+- `16-layer`, `seq_len=256`, `80000` steps
+- `seq_len=512` comparisons
+- projected-K/V versus non-projected historical K/V
+
+This is already stronger than a single-point benchmark story because the gains appear across multiple settings rather than only one run.
+
+### 6.3 Main Result Narrative
+
+The main result section should emphasize:
+
+- the gains are **stable rather than dramatic**
+- the method improves perplexity by **roughly 2% to 4%**
+- the gains persist across multiple depths and context settings
+
+The best current wording is:
+
+> The proposed method consistently improves over standard Transformer baselines across the tested settings, indicating that explicit layer-depth memory is a useful architectural signal even when the baseline is already fairly strong.
+
+### 6.4 Important Caveat
+
+The paper should explicitly state that:
+
+- the current implementation is still a prototype
+- runtime overhead is significant
+- measured wall-clock slowdown is larger than the pure theoretical compute ratio
+
+This makes the paper more credible, not less.
+
+---
+
+## 7. Minimum Tables and Figures
+
+The minimum viable **submission version** should contain:
+
+### Table 1: Main Results
+
+Columns:
+
+- Method
+- Layers
+- Seq Len
+- Steps
+- Params
+- Best Val PPL
+- Best Test PPL
+
+Rows should include at least:
+
+- `baseline`
+- `attn_residual`
+- `attn_residual_2d`
+- `single-q + sublayer + projected K/V` (ours)
+
+Only keep the strongest, cleanest settings in the main paper.
+
+### Table 2: Key Ablations
+
+Recommended ablations:
+
+- final method
+- without sublayer memory
+- without projected K/V
+- baseline
+
+The goal is to justify why the final method is the final method.
+
+### Table 3: Efficiency Trade-off
+
+Columns:
+
+- Method
+- Params
+- Test PPL
+- Step Time
+- Tokens/s
+- Peak GPU Memory
+
+This table does not need to show that the method is efficient. It only needs to honestly quantify the trade-off.
+
+### Figure 1: Training Curves
+
+At least one plot:
+
+- baseline vs final method
+- validation PPL versus training steps
+
+This is especially useful because earlier observations suggested that different methods can differ meaningfully in optimization trajectory.
+
+---
+
+## 8. Submission Version vs arXiv Version
+
+### Submission Version
+
+Keep it focused:
+
+- one main method
+- limited but clean main results
+- one key ablation table
+- one efficiency table
+- one training-curve figure
+
+Avoid dumping every exploratory branch into the main text.
+
+### arXiv Version
+
+Add more material in appendix or supplementary sections:
+
+- more training curves
+- more experimental settings
+- extra variants that worked but are not the final method
+- more implementation discussion
+- theoretical complexity derivation
+- more detailed efficiency discussion
+
+The arXiv version should be broader, but still have the same main claim as the submission version.
+
+---
+
+## 9. Recommended Next Writing Steps
+
+### Immediate
+
+1. Replace placeholders in the main results section with the actual selected numbers.
+2. Write the experimental setup subsection with the exact tokenizer, optimizer, batch size, sequence length, and evaluation protocol.
+3. Draft the efficiency paragraph with careful wording that distinguishes theoretical overhead from prototype implementation overhead.
+
+### Next
+
+4. Add the key ablation subsection.
+5. Add one training-curve figure.
+6. Draft Related Work around:
+   - cross-layer attention
+   - memory-augmented Transformers
+   - residual aggregation / Attention Residuals
+
+### Before Submission
+
+7. Split this mother draft into:
+   - a **submission draft**
+   - an **arXiv-expanded draft**
+
+---
+
+## 10. Current Risks To Address In Writing
+
+These should be handled explicitly in the paper:
+
+- gains are moderate, not huge
+- runtime overhead is real
+- current implementation is not fully optimized
+- tokenizer choice makes absolute perplexity comparisons delicate
+
+If these are written openly and carefully, they do not weaken the paper. They make it look more rigorous.
+
+---
+
+## 11. One-Sentence Paper Summary
+
+> We propose a single-query, sublayer-level layer-depth memory routing mechanism for decoder-only Transformers, and show that it delivers stable 2% to 4% perplexity improvements across multiple WikiText-103 settings while introducing a measurable but still-optimizable runtime cost.
+
+---
+
+## 12. Fill-In Experiment Tables
+
+Use this section as the working table area for both the submission version and the arXiv version. Fill the numbers here first, then later move the final selected rows into the polished paper tables.
+
+### 12.1 Main Results Table
+
+| Method | Layers | Seq Len | Steps | Params (M) | Last Step | Last Val PPL | Last Test PPL | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Baseline | 8 | 256 | 40000 | 33593472 |  |33.5519  | 34.5286 |  |
+| Ours (single-q + sublayer + projected K/V) | 8 | 256 | 40000 | 3.3889e+7 |  |32.3694  | 33.5314 |  |
+| Baseline | 8 | 256 | 80000 |  |  | 27.5747 | 28.4682 |  |
+| Ours (single-q + sublayer + projected K/V) | 8 | 256 | 80000 |  |  |  26.5059 |27.5812 |  |
+| Baseline | 16 | 256 | 80000 | 4.7789e+7 |  | 25.2991 | 26.281 |  |
+| Ours (single-q + sublayer + projected K/V) | 16 | 256 | 80000 |4.8085e  |  |24.6331  | 25.5485 |  |
+| Baseline | 8 | 512 | 80000 | 3.3692e+7 |  |23.53  | 24.0251 |  |
+| Ours (single-q + sublayer + projected K/V) | 8 | 512 | 80000 |  |  | 22.89 |23.4636  |  |
+| Baseline | 16 | 512 | 80000 |  |  |  |  | optional |
+| Ours (single-q + sublayer + projected K/V) | 16 | 512 | 80000 |  |  |  |  | optional |
+
+### 12.2 Key Ablation Table
+
+| Variant | Layers | Seq Len | Steps | Params (M) | Best Val PPL | Best Test PPL | Relative to Baseline | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| Baseline |  |  |  |  |  |  |  |  |
+| Ours (single-q + sublayer + projected K/V) |  |  |  |  |  |  |  | final method |
+| Ours w/o sublayer |  |  |  |  |  |  |  |  |
+| Ours w/o projected K/V | 8 |  256|80000  |3.3889e+7  | 26.3196 | 27.3254 |  | raw-history variant |
+| AttnResidual |  |  |  |  |  |  |  | optional |
+| AttnResidual2D |  |  |  |  |  |  |  | optional |
+
+### 12.3 Efficiency Table
+
+If `tokens/s` is not directly logged, fill:
+
+\[
+\text{tokens/s} =
+\frac{\text{batch size} \times \text{seq len} \times \text{grad accum steps}}{\text{step time}}
+\]
+
+using global batch size if the logged batch is already global.
+
+| Method | Layers | Seq Len | Steps Used for Timing | Params (M) | Best Test PPL | Step Time (s) | Tokens/s | Peak GPU Mem (GB) | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Baseline | 8 | 256 |  |  |  |  |  | 7.8 |  |
+| Ours (single-q + sublayer + projected K/V) | 8 | 256 |  |  |  |  |  |8.4  |  |
+| Baseline | 16 | 256 |  |  |  |  |  | 9.58 |  |
+| Ours (single-q + sublayer + projected K/V) | 16 | 256 |  |  |  |  |  |  9.6|  |
+| Baseline | 8 | 512 |  |  |  |  |  |11.2  | optional |
+| Ours (single-q + sublayer + projected K/V) | 8 | 512 |  |  |  |  |  |11.2  | optional |
+
+### 12.4 Training Curve Checklist
+
+For the current paper, the minimum recommended curves are:
+
+- `baseline` vs `ours`, `8-layer`, `seq_len=256`
+- `baseline` vs `ours`, `16-layer`, `seq_len=256`
+
+For each curve pair, record:
+
+| Curve Pair | X-axis | Y-axis | Available? | Figure Path / Note |
+|---|---|---|---|---|
+| Baseline vs Ours, 8-layer, seq_len=256 | Steps | Val PPL |  |  |
+| Baseline vs Ours, 16-layer, seq_len=256 | Steps | Val PPL |  |  |
+
+### 12.5 Stability / Seed Table
+
+If you decide to add seeds, use this template.
+
+| Method | Layers | Seq Len | Steps | Seed | Best Val PPL | Best Test PPL | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Baseline |  |  |  | 42 |  |7.8  |  |
+| Ours |  |  |  | 42 |  | 8.4|  |
+| Baseline |  |  |  | 43 |  |  | optional |
+| Ours |  |  |  | 43 |  |  | optional |
+| Baseline |  |  |  | 44 |  |  | optional |
+| Ours |  |  |  | 44 |  |  | optional |

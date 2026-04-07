@@ -9,6 +9,111 @@
 
 ## Current Task History
 
+### [Step 048] - 2026-04-05 11:05 CST - Prepare a clean WikiText-103 ablation trainer
+- Request: Stop circling around the notebook path and write a training script that explicitly imports `ablation_models.py`, targeting WikiText-103 for the current experiments.
+- Plan: Inspect the existing ablation script/model pair, then add a new dedicated training entrypoint with explicit CLI args, cleaner data handling, and SwanLab support instead of reusing the current hard-coded mixed-purpose script.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Refreshed working memory for the new code task after rereading the iterative logger instructions, current dev log, `scripts/train.py`, and `src/layer_depth_attention/ablation_models.py`.
+- Rationale: The repo currently has multiple training stacks with different data paths and defaults; a dedicated WikiText-103 ablation trainer is easier to reason about and compare.
+- Key details: `ablation_models.TinyDecoderLM` already has explicit GPT-style initialization, supports the relevant attention variants, and is a safer base than the notebook approximation path.
+- Side effects: None yet; this is a task-baseline checkpoint.
+- Verification: Read `scripts/train.py` and `src/layer_depth_attention/ablation_models.py`.
+- Next step: Create the new training script and smoke-check it locally.
+
+### [Step 049] - 2026-04-05 15:34 CST - Add dedicated WikiText-103 ablation training entrypoint
+- Request: Provide a training script that directly uses `ablation_models.py` and currently targets the WikiText-103 dataset.
+- Plan: Create a new CLI script instead of mutating the older mixed-purpose training file, keeping data loading, evaluation, and SwanLab handling explicit and configurable.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added `scripts/train_wikitext103_ablation.py`, which imports `layer_depth_attention.ablation_models.TinyDecoderLM`, defaults to `wikitext-103-raw-v1`, supports `hf` and `local_text` data sources, exposes the major training/model knobs via argparse, logs to SwanLab, and writes per-method result JSON summaries.
+- Rationale: The existing `scripts/train.py` mixes notebook-era defaults and multiple experimental assumptions; a dedicated entrypoint is clearer for controlled WikiText-103 ablations and easier to launch on local/remote machines.
+- Key details: The new data pipeline uses whole-split text plus newline-to-EOS replacement, matching the safer full-text tokenization style instead of the older line-by-line token accumulation path in `scripts/train.py`. Validation cursor usage is configurable and defaults to `off` for reproducibility.
+- Side effects: None on existing scripts; this is an additive path.
+- Verification: `python -m py_compile scripts/train_wikitext103_ablation.py src/layer_depth_attention/ablation_models.py` passed.
+- Next step: Share the new script path and an example launch command, then adjust defaults further only if the user wants a different dataset/method lineup.
+
+### [Step 050] - 2026-04-05 15:41 CST - Rename default SwanLab project for the new ablation trainer
+- Request: Change the SwanLab project name used by the new ablation training script.
+- Plan: Only change the default `--log-project` value in the new WikiText-103 trainer, then re-run a syntax check.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Changed the default SwanLab project from `Layer-Depth-Attention-Ablation` to `Layer-Depth-Attention-WikiText103-Ablation`.
+- Rationale: This keeps the new ablation runs separated from the older mixed experiment project and makes the dataset-specific purpose obvious in the dashboard.
+- Key details: Only the default changed; passing `--log-project` still overrides it.
+- Side effects: Future runs of this script without an explicit `--log-project` will land in the new project name.
+- Verification: `python -m py_compile scripts/train_wikitext103_ablation.py` passed.
+- Next step: Tell the user the new default project name and offer to change it again if they want a different naming convention.
+
+### [Step 051] - 2026-04-05 15:45 CST - Sync and launch the new WikiText-103 ablation trainer on the Windows server
+- Request: Push the new ablation trainer to the server and run it there.
+- Plan: Upload the new Python entrypoint and a dedicated Windows launch script, then start the job from the server project directory and verify from the log that training actually begins.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_ablation_default.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Synced the new Python trainer and a dedicated `.bat` launcher to `D:\Projects\Layer-Depth-Attention\scripts\` on the Windows server, then started the launcher there.
+- Rationale: Earlier PowerShell `Start-Process` attempts did not leave a stable detached run/log; the explicit batch launcher produced a visible new Python process and active log output.
+- Key details:
+  - Server launcher path: `D:\Projects\Layer-Depth-Attention\scripts\launch_wikitext103_ablation_default.bat`
+  - Active log path: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_ablation.log`
+  - Confirmed new server Python process started at `2026/4/5 15:44:34` with `pt-3.9`.
+  - Current log already shows parsed config, new SwanLab project name, and `[data] tokenizing raw text splits...`.
+- Side effects: Server now has a new long-running WikiText-103 ablation job in addition to older Python processes.
+- Verification: `scp` succeeded for both files; remote `Test-Path` checks returned `True`; remote process list shows a new `python.exe`; remote log file now has non-zero size and contains the trainer config header plus the tokenization progress line.
+- Next step: Monitor the first training metrics (`step=1`, then the first eval interval) from the server log.
+
+### [Step 052] - 2026-04-05 16:00 CST - Start SwanLab before data loading for single-method runs
+- Request: Fix the bug where SwanLab starts too late; the user wants the run to appear from the very beginning of the program so the full log is visible.
+- Plan: For single-method runs, initialize the same SwanLab monitor in `main()` before `LMData` is constructed, log startup/data metadata at step 0, and reuse that monitor inside `run_experiment`.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added helper functions for experiment/config naming, changed `run_experiment()` to accept an optional prebuilt monitor, and made `main()` eagerly initialize SwanLab before tokenization when only one method is being run.
+- Rationale: The previous script only initialized SwanLab after dataset preparation and model construction, so startup and tokenization logs were invisible in the run timeline.
+- Key details: Multi-method runs still keep one run per method to avoid mixing separate experiments into one SwanLab record; the eager startup behavior applies when `len(args.methods) == 1`.
+- Side effects: Single-method runs now log `program_started`, `num_gpus`, and token counts at step 0 in the same run that later receives training metrics.
+- Verification: `python -m py_compile scripts/train_wikitext103_ablation.py` passed.
+- Next step: Re-upload the script to the server and relaunch a single-method run to confirm SwanLab appears before data tokenization.
+
+### [Step 053] - 2026-04-05 16:03 CST - Relaunch server experiment as single-method dualq-sublayer run
+- Request: Push the early-SwanLab fix, then start a server experiment that only runs `shared_kv_depth_memory_dualq_sublayer`.
+- Plan: Upload the updated trainer plus a dedicated single-method launch script, stop the previous generic WikiText-103 ablation run, and relaunch the new single-method job while watching for immediate SwanLab init output.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Synced the updated trainer and new `launch_wikitext103_dualq_sublayer.bat` to the server, stopped the old 15:44 WikiText-103 run, and relaunched a single-method `shared_kv_depth_memory_dualq_sublayer` experiment.
+- Rationale: A single-method launch is required for the new early SwanLab initialization path, and it avoids mixing multiple methods into one run.
+- Key details:
+  - New active server process started at `2026/4/5 16:02:31`.
+  - Server log file: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_dualq_sublayer.log`
+  - SwanLab run URL: `https://swanlab.cn/@justbook/Layer-Depth-Attention-WikiText103-Ablation/runs/chli1fbnc2lrhkj7m3gwp`
+  - Log already shows SwanLab cloud sync before dataset tokenization finishes.
+- Side effects: The prior generic `wikitext103_ablation` run was terminated and replaced by the dedicated single-method run.
+- Verification: Remote process list shows new `python.exe`; log file is non-empty and contains the new single-method config plus successful SwanLab initialization.
+- Next step: Watch for token-count output and the first `step=1` metric from the new server log.
+
+### [Step 054] - 2026-04-05 17:22 CST - Launch sequential baseline then attn_residual comparison on the server
+- Request: Run `baseline` and `attn_residual` in the same batch, with `baseline` first.
+- Plan: Add a dedicated Windows launcher that passes `--methods baseline attn_residual`, sync it to the server, and start the job while confirming from the log that the methods list is in the requested order.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_baseline_attnresidual.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added and synced `launch_wikitext103_baseline_attnresidual.bat`, then started it on the server. The new run uses the shared `train_wikitext103_ablation.py` entrypoint and logs to `wikitext103_baseline_attnresidual.log`.
+- Rationale: The user wants a fair sequential comparison under one clean training stack, with `baseline` finishing before `attn_residual` begins.
+- Key details:
+  - New active server process started at `2026/4/5 17:22:14`.
+  - Log file: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_baseline_attnresidual.log`
+  - The log already shows `methods = ["baseline", "attn_residual"]` in that order.
+- Side effects: This run uses the multi-method path, so SwanLab early init is not used; each method will still create its own run when its training starts.
+- Verification: Remote process list showed a new `python.exe`; remote log file was created and contains the expected ordered methods list.
+- Next step: Monitor the log until it emits `running baseline`, then capture the first baseline metrics before `attn_residual` starts.
+
+### [Step 055] - 2026-04-05 22:16 CST - Launch 16-layer 80k-step four-method server batch
+- Request: Run four methods on the server in this exact order: `shared_kv_depth_memory_dualq_sublayer`, `baseline`, `attn_residual_2d`, `attn_residual`, with `num_layers=16` and `steps=80000`.
+- Plan: Create a dedicated Windows launcher encoding the requested order and hyperparameters, sync it to the server, stop current Python training jobs, and relaunch while checking the log for the exact method order and new step budget.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_four_methods_16l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added and synced `launch_wikitext103_four_methods_16l_80000.bat`, terminated the current server Python jobs, and started the new batch run. The active server log is now `D:\Projects\Layer-Depth-Attention\logs\wikitext103_four_methods_16l_80000.log`.
+- Rationale: The user wants a longer, deeper, fixed-order four-method comparison under the same WikiText-103 ablation trainer.
+- Key details:
+  - New active server process started at `2026/4/5 22:15:49`.
+  - Log confirms:
+    - `num_layers = 16`
+    - `steps = 80000`
+    - ordered methods: `shared_kv_depth_memory_dualq_sublayer`, `baseline`, `attn_residual_2d`, `attn_residual`
+  - Only one new `pt-3.9` Python process remains active after relaunch.
+- Side effects: Earlier batch runs were stopped to free resources for this long run.
+- Verification: Remote process list showed a single new `python.exe`; remote log file exists and contains the expected method order and training configuration.
+- Next step: Monitor `wikitext103_four_methods_16l_80000.log` for token counts and the first metrics from `shared_kv_depth_memory_dualq_sublayer`.
+
 ### [Step 001] - 2026-04-02 02:25 CST - Reassess sync topology
 - Request: Stop using the self-built repository sync path and synchronize through Git immediately.
 - Plan: Inspect local/worktree Git remotes, inspect the server repository remotes and branch status, then switch back to GitHub-based sync and perform a live sync.
@@ -301,3 +406,149 @@
 - Side effects: Existing runs/configs remain valid because the new flag defaults to `on`.
 - Verification: Pending local smoke test and no-pos training run.
 - Next step: Run local compile/smoke tests, then launch a no-position baseline on the standard text benchmark.
+
+### [Step 047] - 2026-04-05 15:08 CST - Audit main-repo model code for root causes of poor LM perplexity
+- Request: Inspect the current model code and identify whether there is a real implementation problem that could explain unexpectedly poor language-model perplexity.
+- Plan: Re-read the main-repo `TinyDecoderLM` baseline path in `model.py`, focusing on initialization, baseline attention wiring, output head tying, and anything that would directly distort early logits or baseline training quality.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Recorded the model-code audit and the main findings.
+- Rationale: The user asked for a direct code inspection rather than more speculation about datasets or platforms.
+- Key details:
+  - `TinyDecoderLM` in `src/layer_depth_attention/model.py` still has no global `_init_weights` / `self.apply(...)` path for embeddings, linear layers, or layer norms.
+  - The model ties `lm_head.weight` to `token_emb.weight`, but both are left at framework-default initialization.
+  - This is consistent with the earlier empirical symptom that `step=1` losses were around `200+`, far above the expected `ln(vocab_size)` regime for a sane LM initialization.
+  - The baseline forward path itself is structurally normal (`token_emb + pos_emb -> blocks -> final_norm -> lm_head`); no obvious cross-entropy or residual wiring bug was found in the baseline branch.
+  - A secondary inefficiency remains: even the baseline path keeps appending `past_kv` and `past_states` lists although the baseline attention ignores them, which wastes memory but should not by itself destroy perplexity.
+- Side effects: None on code yet; this is a diagnosis checkpoint.
+- Verification: Inspected `src/layer_depth_attention/model.py` around `TinyDecoderLM`, `TransformerBlock`, and `CausalSelfAttention`.
+- Next step: If requested, patch the main-repo model with explicit GPT-style initialization and rerun a controlled baseline to see whether step-1 loss returns to the expected scale.
+
+### [Step 056] - 2026-04-06 16:23 CST - Switch server batch to 8-layer dualq-sublayer then baseline
+- Request: Interrupt the previous server process and instead run only two methods in this order: `shared_kv_depth_memory_dualq_sublayer`, `baseline`, with `num_layers=8` and `steps=80000`.
+- Plan: Add a dedicated Windows launcher for the requested order and hyperparameters, sync it to the server, stop the current run, and relaunch while verifying the new log contents.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer_baseline_8l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added and synced `launch_wikitext103_dualq_sublayer_baseline_8l_80000.bat`, stopped the prior server training process, and started the new two-method 8-layer run.
+- Rationale: The user narrowed the comparison to a simpler pairwise run under the same WikiText-103 ablation trainer.
+- Key details:
+  - New active server process started at `2026/4/6 16:22:38`.
+  - Log path: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_dualq_sublayer_baseline_8l_80000.log`
+  - Log confirms `steps = 80000` and ordered methods `shared_kv_depth_memory_dualq_sublayer`, `baseline`.
+- Side effects: The earlier long-running server job was terminated and replaced by this pairwise run.
+- Verification: Remote process list shows a single new `pt-3.9` Python process; the remote log file exists and contains the expected method list and training configuration.
+- Next step: Monitor the log for token counts and the first metrics from `shared_kv_depth_memory_dualq_sublayer`.
+
+### [Step 057] - 2026-04-06 21:16 CST - Sync live server files back to local and remove per-forward history restacking
+- Request: Pull the server's current versions down to local first, then modify locally, then push the updated files back to the server.
+- Plan: Download the live remote `ablation_models.py` and `train_wikitext103_ablation.py`, overwrite the local copies with those remote snapshots, then optimize the dualq memory path by replacing repeated Python-list `torch.stack` work with incrementally maintained stacked history tensors.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/ablation_models.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Pulled the remote files to `/tmp`, backed up the prior local copies, replaced the workspace versions with the server snapshots, changed `SharedKVDepthMemoryDualQAttention.forward()` to consume `(past_keys, past_values)` tensors directly, added `TinyDecoderLM._append_past_kv()` to build those tensors incrementally, and pushed the synchronized+patched files back to the server.
+- Rationale: The method only carries about 32 past slots at 16 layers, so the most suspicious avoidable slowdown is not raw history count but repeated Python traversal and `torch.stack([...])` in every block forward.
+- Key details:
+  - Semantics are preserved: history order and the set of stored K/V states are unchanged.
+  - `shared_kv_depth_memory_dualq` and `shared_kv_depth_memory_dualq_sublayer` now keep `past_kv` as stacked tensors shaped `[B, H, S, M, d]`.
+  - Remote file timestamps were updated at `2026/4/6 21:15:35`.
+- Side effects: Already-running server jobs keep using the old in-memory code until restarted; the pushed files only affect future launches.
+- Verification: `python -m py_compile src/layer_depth_attention/ablation_models.py scripts/train_wikitext103_ablation.py` passed locally; remote `Get-Item` confirmed both updated files after upload.
+- Next step: When the current run finishes, restart a controlled dualq-sublayer vs baseline comparison and compare step-time / eval-time directly instead of only end-to-end elapsed minutes.
+
+### [Step 058] - 2026-04-06 21:19 CST - Restart single-method 16-layer dualq-sublayer 80000-step server run
+- Request: Run the current method alone on the server with `num_layers=16` and `steps=80000` (the user explicitly clarified `80000`, not `8000`).
+- Plan: Add a dedicated launcher for the requested single-method 16-layer configuration, sync it to the server, stop the current `pt-3.9` Python training job, and restart the requested run while verifying the remote log header.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer_16l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added `launch_wikitext103_dualq_sublayer_16l_80000.bat`, uploaded it to the server, stopped the previous `pt-3.9` Python training process, and started the new run.
+- Rationale: The user wants a clean single-method long run on the updated code path to test the 16-layer method directly without mixing in other methods.
+- Key details:
+  - Log path: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_dualq_sublayer_16l_80000.log`
+  - Log header confirms `steps = 80000`
+  - Log header confirms methods list contains only `shared_kv_depth_memory_dualq_sublayer`
+  - SwanLab run initialized successfully for `shared_kv_depth_memory_dualq_sublayer_wikitext-103-raw-v1_384d_16l`
+- Side effects: The previous server training process was interrupted and replaced by this single-method run.
+- Verification: Remote log tail showed the requested method name, `steps=80000`, and successful SwanLab initialization.
+- Next step: Monitor the first metric lines and, after completion, compare its runtime/quality against the earlier 16-layer baseline run.
+
+### [Step 059] - 2026-04-06 21:41 CST - Stop the active 16-layer dualq-sublayer server run
+- Request: Stop the experiment currently running on the server.
+- Plan: Terminate any `python.exe` processes under the server's `pt-3.9` environment, then verify that no such process remains and note the current log file timestamp.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Sent a remote PowerShell stop command for all `D:\Annaconda\envs\pt-3.9\python.exe` training processes and verified that the filtered process query returned empty afterwards.
+- Rationale: The user wants the active line stopped before continuing with more speed-oriented optimization work.
+- Key details:
+  - Active log at stop time: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_dualq_sublayer_16l_80000.log`
+  - Observed log metadata after stop: `LastWriteTime = 2026/4/6 21:40:55`, `Length = 3109`
+- Side effects: The in-progress 16-layer 80000-step dualq-sublayer run was interrupted before completion.
+- Verification: Remote post-stop process query returned no matching `pt-3.9` Python processes.
+- Next step: Decide whether to profile/optimize locally first or relaunch a controlled timing comparison on the updated code path.
+
+### [Step 060] - 2026-04-07 00:03 CST - Prepare sequential mixed-seq WikiText-103 server batch
+- Request: Run three experiments on the server in sequence: method at `seq_len=256` for `80000` steps, then baseline at `seq_len=512` for `80000` steps, then the method again at `seq_len=256` for `80000` steps.
+- Plan: Create a dedicated Windows batch launcher that invokes `train_wikitext103_ablation.py` three times with the requested method/sequence-length order, reusing one combined log file for the batch.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_seq_mix_method_base_method_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added `launch_wikitext103_seq_mix_method_base_method_80000.bat` with three sequential phases:
+  1. `shared_kv_depth_memory_dualq_sublayer`, `--max-seq-len 256`, `--steps 80000`
+  2. `baseline`, `--max-seq-len 512`, `--steps 80000`
+  3. `shared_kv_depth_memory_dualq_sublayer`, `--max-seq-len 256`, `--steps 80000`
+- Rationale: The user wants a direct sequential comparison where the method is run before and after a longer-context baseline under the same general trainer.
+- Key details:
+  - Assumed the default `num_layers=8` because the user did not specify layer count in this request.
+  - Combined log path is `D:\Projects\Layer-Depth-Attention\logs\wikitext103_seq_mix_method_base_method_80000.log`.
+- Side effects: None yet; this step only prepares the launcher locally.
+- Verification: Launcher file created successfully.
+- Next step: Sync the launcher to the server and start the batch, stopping any new active `pt-3.9` training process first if needed.
+
+### [Step 061] - 2026-04-07 01:32 CST - Start sequential mixed-seq WikiText-103 server batch
+- Request: Actually run the prepared three-phase server batch: method `seq_len=256` for `80000` steps, then baseline `seq_len=512` for `80000` steps, then the method again `seq_len=256` for `80000` steps.
+- Plan: Upload the dedicated launcher, execute it from the server project root, and verify from the shared log that phase 1 started with the requested method and sequence length.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_seq_mix_method_base_method_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Uploaded `launch_wikitext103_seq_mix_method_base_method_80000.bat` to the Windows server and started it; confirmed phase 1 is running with `shared_kv_depth_memory_dualq_sublayer`, `max_seq_len=256`, and `steps=80000`.
+- Rationale: The user wants this exact method/baseline/method sequence under mixed context lengths to compare behavior across phases.
+- Key details:
+  - Combined log path: `D:\Projects\Layer-Depth-Attention\logs\wikitext103_seq_mix_method_base_method_80000.log`
+  - Phase marker written to log: `[phase 1] method seq256 steps80000`
+  - Verified config in log shows `max_seq_len = 256`, `steps = 80000`, `methods = ["shared_kv_depth_memory_dualq_sublayer"]`
+  - The run is currently using `num_layers = 8` because the request did not override the trainer default.
+  - Current device report in the log is `cuda num_gpus = 1`
+- Side effects: The sequential batch is now occupying the server until all three phases finish or the user interrupts it.
+- Verification: Remote log tail confirmed the phase marker, config header, and successful SwanLab initialization for phase 1.
+- Next step: Monitor the combined log until phase 1 emits metrics and later verify that phase 2 switches to `baseline` with `max_seq_len=512`.
+
+### [Step 062] - 2026-04-07 16:44 CST - Rewrite the paper mother draft around the current final method
+- Request: Start writing the paper now, with one version intended for submission and another for arXiv.
+- Plan: Reuse the existing `docs/paper_draft.md` path but replace the outdated old-mainline content with a new mother draft centered on the current final method and a clear split between submission and arXiv versions.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/docs/paper_draft.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Replaced the old draft, which still focused on earlier WikiText-2/value-reprojection lines, with a new mother draft built around the current final method: **single-q + sublayer + projected K/V**. The new draft now includes title options, an abstract draft, introduction/contribution framing, method description, experiment-section plan, minimum table/figure plan, and explicit guidance on how to split the mother draft into a tighter submission version and a fuller arXiv version.
+- Rationale: The writing phase should start from the method and evidence that actually survived the experimental selection process, not from an older exploratory line that is no longer the paper's main story.
+- Key details:
+  - The new draft explicitly treats the paper as a mechanism paper with stable but moderate gains.
+  - It distinguishes between theoretical cost and prototype implementation overhead.
+  - It reserves extra variants/curves for arXiv or appendices instead of overloading the main submission story.
+- Side effects: The previous `paper_draft.md` content is no longer the active paper direction and should not be used as the main writing base.
+- Verification: Re-read the new `docs/paper_draft.md` after patching to ensure the final-method definition, paper positioning, and table plan match the current experimental state.
+- Next step: Fill in the main result numbers, draft the experimental setup section with exact hyperparameters, and then create a separate submission-outline file if the user wants a more journal/conference-shaped manuscript next.
+
+### [Step 063] - 2026-04-07 16:53 CST - Sync server-side experiment code back to local workspace
+- Request: Pull the current server-side version back to the local computer first, because some code changes were made on the server earlier.
+- Plan: Inspect the server repository state and commit history, identify which files diverged from the local workspace since the local base commit, back up the current local copies, and then overwrite the local workspace with the server versions for the affected experiment files only.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/src/layer_depth_attention/ablation_models.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/train_wikitext103_ablation.py`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_ablation_default.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_baseline_attnresidual.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer_16l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_dualq_sublayer_baseline_8l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_four_methods_16l_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/scripts/launch_wikitext103_seq_mix_method_base_method_80000.bat`, `/Users/a/Projects/Layer-Depth-Attention/notebooks/103 without model.ipynb`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Queried the server repo and found it clean but ahead of local (`server HEAD=fef65f5`, local `HEAD=b7a0dab`). Retrieved the changed-file list from `git diff --name-only b7a0dab..HEAD` on the server, backed up the current local experiment files to `/tmp/layer_depth_attention_sync_backup`, and then copied the server versions of the changed training/model/launcher/notebook files into the local workspace.
+- Rationale: The user wants the local machine to reflect the code that was actually being edited and run on the server, rather than continuing with a diverged local experiment branch.
+- Key details:
+  - Server commits ahead of local: `22615c9 add lightattention`, `fef65f5 feat ：modify attres`
+  - Synced files were limited to the server-changed experiment files; paper draft and memory files were intentionally left alone.
+  - Local backups were created under `/tmp/layer_depth_attention_sync_backup`.
+- Side effects: The local workspace now reflects the server-side experiment code for the synced files, so any local-only edits in those files are preserved only in the `/tmp` backup copies.
+- Verification: Remote `git status --short` was empty; selected files were copied down via `scp`; `python -m py_compile src/layer_depth_attention/ablation_models.py scripts/train_wikitext103_ablation.py` passed locally after the sync.
+- Next step: If needed, inspect the synced server changes in `ablation_models.py` / `train_wikitext103_ablation.py`, then decide whether to push this reconciled state to GitHub as the new single source of truth.
+
+### [Step 064] - 2026-04-07 17:03 CST - Add fill-in experiment table templates to the paper draft
+- Request: Put experiment tables directly into the paper draft so the user can fill the numbers in there.
+- Plan: Extend the mother draft with a dedicated section containing editable templates for the main results table, key ablation table, efficiency table, training-curve checklist, and an optional seed/stability table.
+- Files touched: `/Users/a/Projects/Layer-Depth-Attention/docs/paper_draft.md`, `/Users/a/Projects/Layer-Depth-Attention/dev_log.md`
+- Modification: Added Section 12 to `docs/paper_draft.md`, containing markdown table templates for the main results, ablations, efficiency metrics, curve checklist, and seed runs, plus the `tokens/s` formula to make later filling straightforward.
+- Rationale: The user wants to fill the experiment numbers directly into the draft instead of collecting them elsewhere first.
+- Key details:
+  - The main table already includes the most likely core settings: 8-layer and 16-layer, `seq_len=256`, and optional `seq_len=512`.
+  - The ablation table is aligned with the current final method choice: `single-q + sublayer + projected K/V`.
+  - The efficiency table includes `step time`, `tokens/s`, and `peak GPU memory` columns.
+- Side effects: None; this only affects the draft-writing workflow.
+- Verification: Re-read the appended Section 12 in `docs/paper_draft.md` after patching.
+- Next step: Fill the main results rows using the current completed runs, then turn those filled templates into polished submission tables later.
