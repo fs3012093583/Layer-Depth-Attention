@@ -25,3 +25,12 @@ call D:\Annaconda\Scripts\activate.bat pt-3.9
 cd /d D:\Projects\Layer-Depth-Attention
 python train_assoc_recall.py --device cuda --steps 200
 ```
+## Paper Writing Note
+
+The canonical paper-writing workspace for the public-facing branch is now:
+
+- `paper/paper_draft.md`
+- `paper/figures/`
+
+Older draft/supporting notes may still exist under `docs/`, but new manuscript edits
+should go to `paper/paper_draft.md`.

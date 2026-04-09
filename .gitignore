@@ -84,3 +84,24 @@ pip-delete-this-directory.txt
 # Project Specific
 artifacts/
 external_data/
+
+# Internal working memory / private notes
+dev_log.md
+docs/dev_log.md
+memory/
+
+# Local analysis workspaces and pulled checkpoints
+analysis_checkpoints/
+analysis_outputs/
+
+# Publication workspace
+paper/build/
+paper/tmp/
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*.pdf

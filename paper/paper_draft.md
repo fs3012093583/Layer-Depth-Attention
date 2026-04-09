@@ -148,7 +148,7 @@ The resulting sequence is passed through the usual output projection and then th
 **[Figure 1 about here]**  
 **Figure 1.** Overview of the proposed layer-depth attention routing block. The standard row-wise causal attention pathway is preserved, while the block also exports sublayer-level K/V entries to a layer-depth memory archive. At the next layer, the current token uses a single query to route attention jointly over current-layer token context and earlier-layer same-position memory. Row-wise scores and depth-memory scores are concatenated before a shared softmax, so both sources compete for one unified attention budget.
 
-![Figure 1: Layer-depth attention routing block](/Users/a/Projects/Layer-Depth-Attention/analysis_outputs/pic/Layer-Depth-attention-architectcture.png)
+![Figure 1: Layer-depth attention routing block](/Users/a/Projects/Layer-Depth-Attention/paper/figures/figure1_architecture.png)
 
 ### 2.6 What "Sublayer Memory" Means in Practice
 
@@ -370,13 +370,13 @@ Taken together, these analyses strengthen the main claim of the paper. The propo
 **[Figure 3 about here]**  
 **Figure 3.** Attention-allocation analysis. Top left: average row-vs-depth attention mass by layer, showing that the depth branch becomes substantially more active in middle and late layers. Top right: depth-memory slot heatmap, showing that retrieval is selective rather than uniformly spread over all historical slots. Bottom left: baseline attention matrix (`seq=64`, layer 13), where all mass is distributed over token positions only. Bottom right: proposed joint attention matrix (`seq=64`, layer 13), where part of the attention budget is routed to a distinct region of layer-depth slots.
 
-![Figure 3a: Row vs depth attention mass by layer](/Users/a/Projects/Layer-Depth-Attention/analysis_outputs/shared_kv_depth_memory_dualq_sublayer_16l_step40000_b5/row_vs_depth_mass.png)
+![Figure 3a: Row vs depth attention mass by layer](/Users/a/Projects/Layer-Depth-Attention/paper/figures/figure3a_row_vs_depth_mass.png)
 
-![Figure 3b: Depth-memory slot heatmap](/Users/a/Projects/Layer-Depth-Attention/analysis_outputs/shared_kv_depth_memory_dualq_sublayer_16l_step40000_b5/depth_slot_heatmap.png)
+![Figure 3b: Depth-memory slot heatmap](/Users/a/Projects/Layer-Depth-Attention/paper/figures/figure3b_depth_slot_heatmap.png)
 
-![Figure 3c: Baseline attention matrix at seq=64, layer 13](/Users/a/Projects/Layer-Depth-Attention/analysis_outputs/baseline_16l_step20000_matrix_l13_s64/joint_attention_matrix.png)
+![Figure 3c: Baseline attention matrix at seq=64, layer 13](/Users/a/Projects/Layer-Depth-Attention/paper/figures/figure3c_baseline_joint_attention_s64.png)
 
-![Figure 3d: Proposed joint attention matrix at seq=64, layer 13](/Users/a/Projects/Layer-Depth-Attention/analysis_outputs/shared_kv_depth_memory_dualq_sublayer_16l_step40000_matrix_l13_s64/joint_attention_matrix.png)
+![Figure 3d: Proposed joint attention matrix at seq=64, layer 13](/Users/a/Projects/Layer-Depth-Attention/paper/figures/figure3d_ours_joint_attention_s64.png)
 
 ---
 
