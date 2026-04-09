@@ -18,6 +18,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -71,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use-data-parallel", choices=["on", "off"], default="on")
     parser.add_argument("--val-use-cursor", choices=["on", "off"], default="off")
+    parser.add_argument("--checkpoint-every", type=int, default=20000)
 
     parser.add_argument(
         "--methods",
@@ -292,6 +294,16 @@ def build_experiment_name(method_name: str, args: argparse.Namespace) -> str:
     return f"{method_name}_{args.dataset_config}_{args.d_model}d_{args.num_layers}l"
 
 
+def build_run_id(args: argparse.Namespace) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    config_tag = (
+        f"{args.dataset_config}_seq{args.max_seq_len}_"
+        f"{args.d_model}d_{args.num_layers}l_"
+        f"steps{args.steps}_seed{args.seed}"
+    )
+    return f"{timestamp}_{config_tag}"
+
+
 def build_monitor_config(
     args: argparse.Namespace,
     method_name: str,
@@ -393,6 +405,36 @@ def run_experiment(
         monitor.init()
     monitor.log({"model_params": param_count}, step=0)
 
+    run_root = Path(args.run_root)
+    method_dir = run_root / method_name
+    method_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = method_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_events: List[Dict[str, object]] = []
+
+    def save_checkpoint(tag: str, step: int) -> str:
+        ckpt_path = checkpoint_dir / f"{method_name}_{args.dataset_config}_{args.d_model}d_{args.num_layers}l_{tag}.pt"
+        payload = {
+            "method": method_name,
+            "step": step,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "model_state_dict": raw_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_record": best_record,
+            "args": vars(args),
+        }
+        torch.save(payload, ckpt_path)
+        checkpoint_events.append(
+            {
+                "tag": tag,
+                "step": step,
+                "path": str(ckpt_path),
+                "saved_at": payload["saved_at"],
+            }
+        )
+        print(f"[checkpoint] saved {tag} at step={step} -> {ckpt_path}")
+        return str(ckpt_path)
+
     for step in range(1, args.steps + 1):
         lr = cosine_lr(step, args.steps, args.lr, args.warmup_steps, args.min_lr_scale)
         for group in optimizer.param_groups:
@@ -445,10 +487,14 @@ def run_experiment(
                 f"elapsed_min={record['elapsed_minutes']:.2f}"
             )
 
+        if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
+            save_checkpoint(f"step{step}", step)
+
     if best_state is not None:
         raw_model.load_state_dict(best_state)
     final_test_batches = None if args.final_test_batches == 0 else args.final_test_batches
     test = evaluate(model, data, "test", args.batch_size, final_test_batches, device, use_cursor=False)
+    final_checkpoint_path = save_checkpoint("final", args.steps)
 
     summary = {
         "method": method_name,
@@ -459,12 +505,12 @@ def run_experiment(
         "best_test_loss": test["loss"],
         "best_test_ppl": test["perplexity"],
         "history": history,
+        "checkpoints": checkpoint_events,
+        "final_checkpoint_path": final_checkpoint_path,
         "args": vars(args),
     }
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{method_name}_{args.dataset_config}_{args.d_model}d_{args.num_layers}l.json"
+    out_path = method_dir / "metrics.json"
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     monitor.log({"best_test_loss": summary["best_test_loss"], "best_test_ppl": summary["best_test_ppl"]}, step=args.steps)
     if owns_monitor:
@@ -485,7 +531,15 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device = {device} num_gpus = {torch.cuda.device_count() if torch.cuda.is_available() else 0}")
+
+    output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    args.run_id = build_run_id(args)
+    args.run_root = str(output_root / args.run_id)
+    Path(args.run_root).mkdir(parents=True, exist_ok=True)
+
     print(json.dumps(vars(args), indent=2, ensure_ascii=False))
+    print(f"run_root = {args.run_root}")
 
     startup_monitor: Optional[SwanLabMonitor] = None
     single_method = len(args.methods) == 1
@@ -547,3 +601,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
