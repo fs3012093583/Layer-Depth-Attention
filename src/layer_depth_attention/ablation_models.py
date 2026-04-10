@@ -750,4 +750,334 @@ class TinyDecoderLM(nn.Module):
             torch.cat([past_keys, k.unsqueeze(3)], dim=3),
             torch.cat([past_values, v.unsqueeze(3)], dim=3),
         )
-    
+
+
+# ============================================================
+# Vision variants for CIFAR100 experiments
+# ============================================================
+
+class VisionBaselineAttention(MultiHeadAttentionBase):
+    """Standard non-causal self-attention used by the ViT baseline."""
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
+        super().__init__(d_model, num_heads, dropout)
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model)
+
+    def forward(self, x: torch.Tensor, past_kv=None, past_x=None):
+        del past_kv, past_x
+        q, k, v = self.qkv_proj(x).chunk(3, dim=-1)
+        q, k, v = self.split_heads(q), self.split_heads(k), self.split_heads(v)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        weights = self.dropout(torch.softmax(scores, dim=-1))
+        out = torch.matmul(weights, v)
+        return self.out_proj(self.merge_heads(out)), (k, v)
+
+
+class VisionSharedKVDepthMemoryAttention(MultiHeadAttentionBase):
+    """
+    Non-causal vision variant of the layer-depth memory attention.
+
+    The current patch/token attends jointly to:
+    - row-wise tokens in the same layer
+    - same-position historical memory from earlier layers/sublayers
+    """
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float, shared_kv: SharedKVProjector):
+        super().__init__(d_model, num_heads, dropout)
+        self.qkv_row_proj = nn.Linear(d_model, 3 * d_model)
+        self.shared_memory_kv = shared_kv
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_x: Optional[torch.Tensor] = None,
+    ):
+        del past_x
+        q_row, k_row, v_row = self.qkv_row_proj(x).chunk(3, dim=-1)
+        q_row = self.split_heads(q_row)
+        k_row = self.split_heads(k_row)
+        v_row = self.split_heads(v_row)
+
+        q_col = q_row
+        k_col = self.split_heads(self.shared_memory_kv.k_proj(x))
+        v_col = self.split_heads(self.shared_memory_kv.v_proj(x))
+
+        token_scores = torch.matmul(q_row, k_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if past_kv is not None:
+            past_keys, past_values = past_kv
+            memory_scores = torch.einsum(
+                "b h s d, b h s l d -> b h s l", q_col, past_keys
+            ) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = self.dropout(torch.softmax(scores, dim=-1))
+            token_w = weights[..., : x.size(1)]
+            mem_w = weights[..., x.size(1) :]
+            token_ctx = torch.matmul(token_w, v_row)
+            mem_ctx = torch.einsum("b h s l, b h s l d -> b h s d", mem_w, past_values)
+            out = token_ctx + mem_ctx
+        else:
+            weights = self.dropout(torch.softmax(token_scores, dim=-1))
+            out = torch.matmul(weights, v_row)
+
+        return self.out_proj(self.merge_heads(out)), (k_col, v_col)
+
+
+class VisionDepthMemoryReuseRowQKVAttention(MultiHeadAttentionBase):
+    """Vision variant that reuses row K/V for depth-memory retrieval."""
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
+        super().__init__(d_model, num_heads, dropout)
+        self.qkv_row_proj = nn.Linear(d_model, 3 * d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_x: Optional[torch.Tensor] = None,
+    ):
+        del past_x
+        q_row, k_row, v_row = self.qkv_row_proj(x).chunk(3, dim=-1)
+        q_row = self.split_heads(q_row)
+        k_row = self.split_heads(k_row)
+        v_row = self.split_heads(v_row)
+
+        token_scores = torch.matmul(q_row, k_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if past_kv is not None:
+            past_keys, past_values = past_kv
+            memory_scores = torch.einsum(
+                "b h s d, b h s l d -> b h s l", q_row, past_keys
+            ) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = self.dropout(torch.softmax(scores, dim=-1))
+            token_w = weights[..., : x.size(1)]
+            mem_w = weights[..., x.size(1) :]
+            token_ctx = torch.matmul(token_w, v_row)
+            mem_ctx = torch.einsum("b h s l, b h s l d -> b h s d", mem_w, past_values)
+            out = token_ctx + mem_ctx
+        else:
+            weights = self.dropout(torch.softmax(token_scores, dim=-1))
+            out = torch.matmul(weights, v_row)
+
+        return self.out_proj(self.merge_heads(out)), (k_row, v_row)
+
+
+class VisionDepthMemoryReuseHiddenStatesAttention(MultiHeadAttentionBase):
+    """Vision variant that reads cached hidden states directly as depth memory."""
+
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
+        super().__init__(d_model, num_heads, dropout)
+        self.qkv_row_proj = nn.Linear(d_model, 3 * d_model)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_x: Optional[torch.Tensor] = None,
+    ):
+        del past_x
+        q_row, k_row, v_row = self.qkv_row_proj(x).chunk(3, dim=-1)
+        q_row = self.split_heads(q_row)
+        k_row = self.split_heads(k_row)
+        v_row = self.split_heads(v_row)
+
+        token_scores = torch.matmul(q_row, k_row.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if past_kv is not None:
+            past_keys, past_values = past_kv
+            memory_scores = torch.einsum(
+                "b h s d, b h s l d -> b h s l", q_row, past_keys
+            ) / math.sqrt(self.head_dim)
+            scores = torch.cat([token_scores, memory_scores], dim=-1)
+            weights = self.dropout(torch.softmax(scores, dim=-1))
+            token_w = weights[..., : x.size(1)]
+            mem_w = weights[..., x.size(1) :]
+            token_ctx = torch.matmul(token_w, v_row)
+            mem_ctx = torch.einsum("b h s l, b h s l d -> b h s d", mem_w, past_values)
+            out = token_ctx + mem_ctx
+        else:
+            weights = self.dropout(torch.softmax(token_scores, dim=-1))
+            out = torch.matmul(weights, v_row)
+
+        return self.out_proj(self.merge_heads(out)), (k_row, v_row)
+
+
+class VisionTransformerBlock(nn.Module):
+    """Vision block that mirrors the language-side block structure without causal masking."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        mlp_ratio: int,
+        dropout: float,
+        attention: nn.Module,
+        shared_kv: SharedKVProjector = None,
+    ):
+        super().__init__()
+        self.attn_norm = nn.LayerNorm(d_model)
+        self.attn = attention
+        self.mlp_norm = nn.LayerNorm(d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, mlp_ratio * d_model),
+            nn.GELU(),
+            nn.Linear(mlp_ratio * d_model, d_model),
+            nn.Dropout(dropout),
+        )
+        self.shared_kv = shared_kv
+        self.extract_sublayers = False
+
+    def forward(self, x: torch.Tensor, past_kv=None):
+        attn_out, kv_attn = self.attn(self.attn_norm(x), past_kv=past_kv)
+        x = x + attn_out
+        x_mid = x
+
+        if self.extract_sublayers and self.shared_kv is not None:
+            norm_x = self.mlp_norm(x_mid)
+            k_ffn = self.attn.split_heads(self.shared_kv.k_proj(norm_x))
+            v_ffn = self.attn.split_heads(self.shared_kv.v_proj(norm_x))
+            current_kv = [kv_attn, (k_ffn, v_ffn)]
+        elif self.extract_sublayers and self.shared_kv is None:
+            x_mid_heads = self.attn.split_heads(x_mid)
+            current_kv = [(x_mid_heads, x_mid_heads)]
+        else:
+            current_kv = kv_attn
+
+        mlp_out = self.mlp(self.mlp_norm(x_mid))
+        x = x + mlp_out
+
+        if self.extract_sublayers and self.shared_kv is None:
+            x_heads = self.attn.split_heads(x)
+            current_kv.append((x_heads, x_heads))
+
+        return x, current_kv
+
+
+class PatchEmbed2D(nn.Module):
+    """CIFAR-style patch embedding layer used by the new vision experiments."""
+
+    def __init__(self, image_size: int, patch_size: int, in_chans: int, d_model: int):
+        super().__init__()
+        if image_size % patch_size != 0:
+            raise ValueError("image_size must be divisible by patch_size")
+        self.grid_size = image_size // patch_size
+        self.num_patches = self.grid_size * self.grid_size
+        self.proj = nn.Conv2d(in_chans, d_model, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj(x)
+        return x.flatten(2).transpose(1, 2)
+
+
+class TinyVisionTransformerAblation(nn.Module):
+    """
+    Tiny ViT-style classifier built on top of the ablation attention family.
+
+    This is the new CIFAR100 entry point. It keeps the visual backbone small and
+    lets us compare:
+    - ViT baseline
+    - your layer-depth attention variants
+    under the same optimizer/data pipeline.
+    """
+
+    VISION_SHARED_KV_TYPES = {
+        "shared_kv_depth_memory_dualq",
+        "shared_kv_depth_memory_dualq_sublayer",
+    }
+
+    def __init__(
+        self,
+        image_size: int = 32,
+        patch_size: int = 4,
+        num_classes: int = 100,
+        d_model: int = 256,
+        num_layers: int = 6,
+        num_heads: int = 8,
+        mlp_ratio: int = 4,
+        dropout: float = 0.1,
+        attention_type: str = "baseline",
+    ):
+        super().__init__()
+        self.attention_type = attention_type
+        self.patch_embed = PatchEmbed2D(image_size, patch_size, 3, d_model)
+        num_tokens = self.patch_embed.num_patches + 1
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_emb = nn.Parameter(torch.zeros(1, num_tokens, d_model))
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, num_classes)
+
+        shared_kv = SharedKVProjector(d_model) if attention_type in self.VISION_SHARED_KV_TYPES else None
+        self.blocks = nn.ModuleList(
+            [
+                self._build_block(
+                    attention_type=attention_type,
+                    d_model=d_model,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    dropout=dropout,
+                    shared_kv=shared_kv,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_emb, std=0.02)
+        self.apply(self._init_weights)
+
+    def _build_block(self, attention_type, d_model, num_heads, mlp_ratio, dropout, shared_kv):
+        if attention_type == "baseline":
+            attn = VisionBaselineAttention(d_model, num_heads, dropout)
+            block = VisionTransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
+        elif attention_type == "shared_kv_depth_memory_dualq":
+            attn = VisionSharedKVDepthMemoryAttention(d_model, num_heads, dropout, shared_kv)
+            block = VisionTransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
+        elif attention_type == "shared_kv_depth_memory_dualq_sublayer":
+            attn = VisionSharedKVDepthMemoryAttention(d_model, num_heads, dropout, shared_kv)
+            block = VisionTransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn, shared_kv)
+            block.extract_sublayers = True
+        elif attention_type == "depth_memory_reuse_row_qkv":
+            attn = VisionDepthMemoryReuseRowQKVAttention(d_model, num_heads, dropout)
+            block = VisionTransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
+        elif attention_type == "depth_memory_hidden_states_sublayer":
+            attn = VisionDepthMemoryReuseHiddenStatesAttention(d_model, num_heads, dropout)
+            block = VisionTransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
+            block.extract_sublayers = True
+        else:
+            raise ValueError(f"Unsupported vision attention_type: {attention_type}")
+        return block
+
+    def _init_weights(self, module: nn.Module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Conv2d):
+            nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="linear")
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.patch_embed(x)
+        batch_size = x.size(0)
+        cls_token = self.cls_token.expand(batch_size, -1, -1)
+        x = torch.cat([cls_token, x], dim=1)
+        x = self.dropout(x + self.pos_emb[:, : x.size(1)])
+
+        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+        for block in self.blocks:
+            if self.attention_type in {"shared_kv_depth_memory_dualq", "depth_memory_reuse_row_qkv"}:
+                x, current_kv = block(x, past_kv=past_kv)
+                past_kv = TinyDecoderLM._append_past_kv(past_kv, current_kv)
+            elif self.attention_type in {"shared_kv_depth_memory_dualq_sublayer", "depth_memory_hidden_states_sublayer"}:
+                x, current_kvs = block(x, past_kv=past_kv)
+                for current_kv in current_kvs:
+                    past_kv = TinyDecoderLM._append_past_kv(past_kv, current_kv)
+            else:
+                x, _ = block(x, past_kv=None)
+
+        x = self.norm(x)
+        return self.head(x[:, 0])

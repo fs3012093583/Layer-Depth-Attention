@@ -445,8 +445,8 @@ The following tables are kept as an internal working appendix for drafting and l
 | Ours (single-q + sublayer + projected K/V) | 16 | 256 | 80000 | 48.08 | 24.6331 | 25.5485 |  |
 | Baseline | 8 | 512 | 80000 | 33.69 | 23.5300 | 24.0251 |  |
 | Ours (single-q + sublayer + projected K/V) | 8 | 512 | 80000 | 33.99 | 22.8900 | 23.4636 |  |
-| Baseline | 16 | 512 | 80000 |  |  |  | optional |
-| Ours (single-q + sublayer + projected K/V) | 16 | 512 | 80000 |  |   20.51|21.09 | optional |
+| Baseline | 16 | 512 | 80000 | 47.8 |  21.87| 21.37 | optional |
+| Ours (single-q + sublayer + projected K/V) | 16 | 512 | 80000 |48.08  |   20.51|21.09 | optional |
 
 ### A.2 Key Ablation Table
 
