@@ -7,7 +7,7 @@ Layer-Depth-Attention ?
   - baseline                              :  Transformer ?
   - shared_kv_baseline                    :  KV ?Baseline?
   - shared_kv_depth_memory_dualq          : ?+ 
-  - shared_kv_depth_memory_dualq_sublayer :  + FFN 
+  - shared_kv_depth_memory_dualq_sublayer : projected depth-memory archive
   - depth_memory_reuse_row_qkv            : ?q/k/v?
   - attn_residual                         : Kimi AttnRes?
   - light_attention                       : ?D 
@@ -19,6 +19,7 @@ Layer-Depth-Attention ?
 """
 
 import math
+import re
 from typing import List, Optional, Tuple
 
 import torch
@@ -59,6 +60,45 @@ class SharedKVProjector(nn.Module):
         super().__init__()
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
+
+
+class DepthWeightedAverage(nn.Module):
+    """
+    DenseFormer depth-weighted average over block outputs.
+
+    For block i, the module mixes the embedding output X0 and previous block
+    outputs up to Xi with learned scalar weights. Weights are initialized to
+    select the current block output, so DenseFormer starts as the baseline.
+    """
+
+    def __init__(self, num_layers: int, dilation: int = 1, period: int = 1):
+        super().__init__()
+        if dilation < 1:
+            raise ValueError("DenseFormer dilation must be >= 1")
+        if period < 1:
+            raise ValueError("DenseFormer period must be >= 1")
+        self.num_layers = num_layers
+        self.dilation = dilation
+        self.period = period
+        self.alphas = nn.ParameterList()
+        for block_idx in range(num_layers):
+            selected = self._selected_history_indices(block_idx)
+            alpha = nn.Parameter(torch.zeros(len(selected)))
+            alpha.data[-1] = 1.0
+            self.alphas.append(alpha)
+
+    def _selected_history_indices(self, block_idx: int) -> List[int]:
+        current_index = block_idx + 1
+        start = current_index % self.dilation
+        return list(range(start, current_index + 1, self.dilation))
+
+    def forward(self, history: List[torch.Tensor], block_idx: int) -> torch.Tensor:
+        if (block_idx + 1) % self.period != 0:
+            return history[-1]
+        selected = self._selected_history_indices(block_idx)
+        stacked = torch.stack([history[index] for index in selected], dim=0)
+        weights = self.alphas[block_idx].to(device=stacked.device, dtype=stacked.dtype)
+        return torch.tensordot(weights, stacked, dims=([0], [0]))
 
 
 # ============================================================
@@ -340,7 +380,9 @@ class AttnResModule(nn.Module):
     """
     def __init__(self, d_model: int):
         super().__init__()
-        self.pseudo_query = nn.Linear(d_model, 1, bias=False)
+        # Each block owns its own AttnResModule instance, so this parameter
+        # naturally becomes a per-layer learnable query vector.
+        self.pseudo_query = nn.Parameter(torch.randn(d_model) * 0.02)
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, layer_history: list, current: torch.Tensor) -> torch.Tensor:
@@ -349,9 +391,9 @@ class AttnResModule(nn.Module):
         V = torch.stack(layer_history + [current], dim=0)   # [L+1, B, S, D]
         K = self.norm(V)
 
-        # 1.  input-dependent ?Query
-        # Q = self.pseudo_query.weight.squeeze(0) * current    # [B, S, D]
-        Q = current
+        # Use a single learned query vector for this layer and broadcast it to
+        # every batch element / token position.
+        Q = self.pseudo_query.view(1, 1, -1).expand_as(current)  # [B, S, D]
 
         # 2. ?Query ?K  sqrt(D) 
         logits = torch.einsum(
@@ -528,12 +570,10 @@ class TransformerBlock(nn.Module):
         # attn_res_mlpx_mid  layer_history ?
         h = self.attn_res_mlp(layer_history, x_mid) if use_ar else x_mid
 
-        # SubLayer ?
+        # Historical memory export. For projected-K/V variants we now keep
+        # only one attention-side memory entry per block.
         if self.extract_sublayers and self.shared_kv is not None:
-            norm_x = self.mlp_norm(x_mid)
-            k_ffn  = self.attn.split_heads(self.shared_kv.k_proj(norm_x))
-            v_ffn  = self.attn.split_heads(self.shared_kv.v_proj(norm_x))
-            current_kv = [kv_attn, (k_ffn, v_ffn)]
+            current_kv = [kv_attn]
         elif self.extract_sublayers and self.shared_kv is None:
             x_mid_heads = self.attn.split_heads(x_mid)
             current_kv = [(x_mid_heads, x_mid_heads)]
@@ -572,10 +612,11 @@ class TinyDecoderLM(nn.Module):
       "baseline"                              -  Transformer
       "shared_kv_baseline"                    -  KV 
       "shared_kv_depth_memory_dualq"          - ?
-      "shared_kv_depth_memory_dualq_sublayer" -  + ?
+      "shared_kv_depth_memory_dualq_sublayer" - projected depth-memory archive
       "depth_memory_reuse_row_qkv"            - ?row q/k/v?
       "depth_memory_hidden_states_sublayer"   - cache residual-merged sublayer outputs
       "attn_residual"                         - Kimi AttnRes
+      "denseformer"                           - DenseFormer DWA baseline
     """
 
     SHARED_KV_TYPES = {
@@ -601,6 +642,7 @@ class TinyDecoderLM(nn.Module):
         super().__init__()
         self.attention_type = attention_type
         self.use_pos_emb    = use_pos_emb
+        self.is_denseformer = attention_type.startswith("denseformer")
 
         self.token_emb  = nn.Embedding(vocab_size, d_model)
         self.pos_emb    = nn.Embedding(max_seq_len, d_model)
@@ -617,6 +659,10 @@ class TinyDecoderLM(nn.Module):
         if shared_cross_q is not None:
             self.shared_cross_q = shared_cross_q  # ?
 
+        if self.is_denseformer:
+            dilation, period = self._parse_denseformer_config(attention_type)
+            self.dwa = DepthWeightedAverage(num_layers, dilation=dilation, period=period)
+
         self.blocks = nn.ModuleList()
         for _ in range(num_layers):
             block = self._build_block(
@@ -631,7 +677,7 @@ class TinyDecoderLM(nn.Module):
 
     def _build_block(self, attention_type, d_model, num_heads, mlp_ratio, dropout,
                      shared_kv, shared_cross_q=None):
-        if attention_type == "baseline":
+        if attention_type == "baseline" or attention_type.startswith("denseformer"):
             attn  = BaselineAttention(d_model, num_heads, dropout)
             block = TransformerBlock(d_model, num_heads, mlp_ratio, dropout, attn)
 
@@ -679,6 +725,20 @@ class TinyDecoderLM(nn.Module):
 
         return block
 
+    @staticmethod
+    def _parse_denseformer_config(attention_type: str) -> Tuple[int, int]:
+        if attention_type == "denseformer":
+            return 1, 1
+        match = re.fullmatch(r"denseformer(?:_k(\d+))?(?:_p(\d+))?", attention_type)
+        if match is None:
+            raise ValueError(
+                "DenseFormer names must be 'denseformer', "
+                "'denseformer_k{dilation}', or 'denseformer_k{dilation}_p{period}'"
+            )
+        dilation = int(match.group(1) or 1)
+        period = int(match.group(2) or 1)
+        return dilation, period
+
     def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -703,8 +763,9 @@ class TinyDecoderLM(nn.Module):
 
 
         past_x = None        #  None
+        dense_history = [x] if self.is_denseformer else None
 
-        for block in self.blocks:
+        for block_idx, block in enumerate(self.blocks):
             if self.attention_type in {
                 "shared_kv_depth_memory",
                 "shared_kv_depth_memory_dualq",
@@ -733,6 +794,10 @@ class TinyDecoderLM(nn.Module):
 
             else:
                 x, _, past_x = block(x, past_kv=None, past_x=past_x)
+
+            if dense_history is not None:
+                dense_history.append(x)
+                x = self.dwa(dense_history, block_idx)
 
         x = self.final_norm(x)
         return self.lm_head(x)
@@ -932,10 +997,7 @@ class VisionTransformerBlock(nn.Module):
         x_mid = x
 
         if self.extract_sublayers and self.shared_kv is not None:
-            norm_x = self.mlp_norm(x_mid)
-            k_ffn = self.attn.split_heads(self.shared_kv.k_proj(norm_x))
-            v_ffn = self.attn.split_heads(self.shared_kv.v_proj(norm_x))
-            current_kv = [kv_attn, (k_ffn, v_ffn)]
+            current_kv = [kv_attn]
         elif self.extract_sublayers and self.shared_kv is None:
             x_mid_heads = self.attn.split_heads(x_mid)
             current_kv = [(x_mid_heads, x_mid_heads)]
