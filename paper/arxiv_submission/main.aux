@@ -1,0 +1,102 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{vaswani2017attention}
+\citation{zhang2026residual}
+\citation{vaswani2017attention}
+\citation{he2016deep}
+\citation{ravula2021realformer}
+\citation{kimi2026attnres}
+\citation{denseformer2024}
+\citation{dca2025}
+\citation{muddformer2025}
+\citation{dai2019transformerxl}
+\citation{dehghani2018universal}
+\citation{lan2019albert}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\citation{wang2022deepnet}
+\@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Method}{3}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Problem Setup}{3}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Row Attention and Depth Memory}{3}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Final Design Used in This Paper}{4}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Single-Q.}{4}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Projected K/V.}{4}{section*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Layer Computation}{4}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Complexity and Memory Overhead}{5}{subsection.2.5}\protected@file@percent }
+\citation{merity2016wikitext}
+\citation{radford2019gpt2}
+\citation{press2017tie}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Overview of the proposed layer-depth attention routing block. The standard row-wise causal attention pathway is preserved, while the block also exports one projected K/V entry to a layer-depth memory archive. At the next layer, the current token uses a single query to route attention jointly over current-layer token context and earlier-layer same-position memory. Row-wise scores and depth-memory scores are concatenated before a shared softmax, so both sources compete for one unified attention budget.}}{6}{figure.1}\protected@file@percent }
+\newlabel{fig:architecture}{{1}{6}{Overview of the proposed layer-depth attention routing block. The standard row-wise causal attention pathway is preserved, while the block also exports one projected K/V entry to a layer-depth memory archive. At the next layer, the current token uses a single query to route attention jointly over current-layer token context and earlier-layer same-position memory. Row-wise scores and depth-memory scores are concatenated before a shared softmax, so both sources compete for one unified attention budget}{figure.1}{}}
+\newlabel{fig:architecture@cref}{{[figure][1][]1}{[1][5][]6}{}{}{}}
+\citation{baevski2018adaptive}
+\citation{dai2019transformerxl}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Experiments}{7}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Benchmark and Setup}{7}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Main Results}{7}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Attention Allocation and Retrieval Patterns}{7}{subsection.3.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Main WikiText-103 results and cost-performance comparison. Each entry reports the median of three runs under the same configuration. The proposed method consistently improves validation and test perplexity across the completed settings with nearly unchanged parameter count. For the 80{,}000-step runs, step time, throughput, and peak GPU memory are reported under matched training configurations.}}{8}{table.1}\protected@file@percent }
+\newlabel{tab:main-results}{{1}{8}{Main WikiText-103 results and cost-performance comparison. Each entry reports the median of three runs under the same configuration. The proposed method consistently improves validation and test perplexity across the completed settings with nearly unchanged parameter count. For the 80{,}000-step runs, step time, throughput, and peak GPU memory are reported under matched training configurations}{table.1}{}}
+\newlabel{tab:main-results@cref}{{[table][1][]1}{[1][7][]8}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Average row-vs-depth attention mass by layer for the 16-layer model. Early layers remain strongly row-dominated, while middle and late layers allocate progressively more attention mass to the depth branch. In the deepest layers, depth retrieval becomes competitive with or slightly stronger than row-wise token routing.}}{8}{figure.2}\protected@file@percent }
+\newlabel{fig:row-depth-mass}{{2}{8}{Average row-vs-depth attention mass by layer for the 16-layer model. Early layers remain strongly row-dominated, while middle and late layers allocate progressively more attention mass to the depth branch. In the deepest layers, depth retrieval becomes competitive with or slightly stronger than row-wise token routing}{figure.2}{}}
+\newlabel{fig:row-depth-mass@cref}{{[figure][2][]2}{[1][8][]8}{}{}{}}
+\citation{vaswani2017attention}
+\citation{radford2019gpt2}
+\citation{vaswani2017attention}
+\citation{zhang2026residual}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Depth-attention share as a function of layer and token position in the 16-layer model. The horizontal axis is sampled every 12 positions for readability. The dominant variation is across layer depth rather than token position: depth retrieval becomes markedly stronger in middle and late layers, while remaining broadly stable across most token positions once the very earliest prefix region is excluded.}}{9}{figure.3}\protected@file@percent }
+\newlabel{fig:depth-by-position}{{3}{9}{Depth-attention share as a function of layer and token position in the 16-layer model. The horizontal axis is sampled every 12 positions for readability. The dominant variation is across layer depth rather than token position: depth retrieval becomes markedly stronger in middle and late layers, while remaining broadly stable across most token positions once the very earliest prefix region is excluded}{figure.3}{}}
+\newlabel{fig:depth-by-position@cref}{{[figure][3][]3}{[1][9][]9}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Ablation Summary}{9}{subsection.3.4}\protected@file@percent }
+\citation{dai2019transformerxl}
+\citation{dehghani2018universal}
+\citation{ravula2021realformer}
+\citation{denseformer2024}
+\citation{dca2025}
+\citation{muddformer2025}
+\citation{kimi2026attnres}
+\citation{ravula2021realformer}
+\citation{denseformer2024}
+\citation{dca2025}
+\citation{kimi2026attnres}
+\citation{zhang2026residual}
+\citation{wang2022deepnet}
+\citation{lan2019albert}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Joint attention maps at layer 13 with sequence length 64. In the baseline, the attention budget is distributed entirely over token positions. In the proposed model, the row-token pathway is preserved but a distinct depth-slot region also receives visible attention mass. This shows that the model does not ignore the added branch; instead, it allocates part of the joint attention budget to a compact set of high-value layer-depth memory slots.}}{10}{figure.4}\protected@file@percent }
+\newlabel{fig:attention-analysis}{{4}{10}{Joint attention maps at layer 13 with sequence length 64. In the baseline, the attention budget is distributed entirely over token positions. In the proposed model, the row-token pathway is preserved but a distinct depth-slot region also receives visible attention mass. This shows that the model does not ignore the added branch; instead, it allocates part of the joint attention budget to a compact set of high-value layer-depth memory slots}{figure.4}{}}
+\newlabel{fig:attention-analysis@cref}{{[figure][4][]4}{[1][9][]10}{}{}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Key ablation summary on the core 8-layer, sequence-length-256 setting. The final single-query projected-K/V design gives the strongest core result among the completed variants currently considered in the paper.}}{10}{table.2}\protected@file@percent }
+\newlabel{tab:ablation}{{2}{10}{Key ablation summary on the core 8-layer, sequence-length-256 setting. The final single-query projected-K/V design gives the strongest core result among the completed variants currently considered in the paper}{table.2}{}}
+\newlabel{tab:ablation@cref}{{[table][2][]2}{[1][9][]10}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Related Work}{10}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion}{11}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A}Appendix: Default Experimental Settings}{11}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {B}Appendix: Training Curves}{11}{appendix.B}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Default training configuration used by the WikiText ablation script. Main-paper comparisons override only the fields explicitly shown in the result tables, most notably layer count, sequence length, and total training steps.}}{12}{table.3}\protected@file@percent }
+\newlabel{tab:default-settings}{{3}{12}{Default training configuration used by the WikiText ablation script. Main-paper comparisons override only the fields explicitly shown in the result tables, most notably layer count, sequence length, and total training steps}{table.3}{}}
+\newlabel{tab:default-settings@cref}{{[table][3][]3}{[1][11][]12}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Validation-loss curves for the main WikiText-103 comparisons at sequence length 256. Solid lines denote the proposed method and dashed lines denote the baseline; colors distinguish the 8-layer and 16-layer settings. The proposed method remains competitive early and retains lower validation loss than the baseline over the main completed training ranges.}}{13}{figure.5}\protected@file@percent }
+\newlabel{fig:training-curves}{{5}{13}{Validation-loss curves for the main WikiText-103 comparisons at sequence length 256. Solid lines denote the proposed method and dashed lines denote the baseline; colors distinguish the 8-layer and 16-layer settings. The proposed method remains competitive early and retains lower validation loss than the baseline over the main completed training ranges}{figure.5}{}}
+\newlabel{fig:training-curves@cref}{{[figure][5][]5}{[1][11][]13}{}{}{}}
+\bibstyle{plain}
+\bibdata{refs}
+\bibcite{baevski2018adaptive}{1}
+\bibcite{dai2019transformerxl}{2}
+\bibcite{dehghani2018universal}{3}
+\bibcite{he2016deep}{4}
+\bibcite{dca2025}{5}
+\bibcite{kimi2026attnres}{6}
+\bibcite{lan2019albert}{7}
+\bibcite{merity2016wikitext}{8}
+\bibcite{denseformer2024}{9}
+\bibcite{press2017tie}{10}
+\bibcite{radford2019gpt2}{11}
+\bibcite{ravula2021realformer}{12}
+\bibcite{vaswani2017attention}{13}
+\bibcite{wang2022deepnet}{14}
+\bibcite{muddformer2025}{15}
+\bibcite{zhang2026residual}{16}
+\gdef \@abspage@last{15}

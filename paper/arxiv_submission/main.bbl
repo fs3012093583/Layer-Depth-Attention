@@ -1,0 +1,99 @@
+\begin{thebibliography}{10}
+
+\bibitem{baevski2018adaptive}
+Alexei Baevski and Michael Auli.
+\newblock Adaptive input representations for neural language modeling.
+\newblock {\em arXiv preprint arXiv:1809.10853}, 2018.
+
+\bibitem{dai2019transformerxl}
+Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc~V. Le, and Ruslan
+  Salakhutdinov.
+\newblock {Transformer-XL}: Attentive language models beyond a fixed-length
+  context.
+\newblock {\em arXiv preprint arXiv:1901.02860}, 2019.
+
+\bibitem{dehghani2018universal}
+Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszkoreit, and {\L}ukasz
+  Kaiser.
+\newblock Universal transformers.
+\newblock {\em arXiv preprint arXiv:1807.03819}, 2018.
+
+\bibitem{he2016deep}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In {\em Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, 2016.
+
+\bibitem{dca2025}
+Mike Heddes, Adel Javanmard, Kyriakos Axiotis, Gang Fu, MohammadHossein Bateni,
+  and Vahab Mirrokni.
+\newblock Deepcrossattention: Supercharging transformer residual connections.
+\newblock {\em arXiv preprint arXiv:2502.06785}, 2025.
+
+\bibitem{kimi2026attnres}
+{Kimi Team}, Guangyu Chen, Yu~Zhang, Jianlin Su, Weixin Xu, Siyuan Pan, Yaoyu
+  Wang, Yucheng Wang, Guanduo Chen, Bohong Yin, Yutian Chen, Junjie Yan, Ming
+  Wei, et~al.
+\newblock Attention residuals.
+\newblock {\em arXiv preprint arXiv:2603.15031}, 2026.
+
+\bibitem{lan2019albert}
+Zhenzhong Lan, Mingda Chen, Sebastian Goodman, Kevin Gimpel, Piyush Sharma, and
+  Radu Soricut.
+\newblock {ALBERT}: A lite {BERT} for self-supervised learning of language
+  representations.
+\newblock {\em arXiv preprint arXiv:1909.11942}, 2019.
+
+\bibitem{merity2016wikitext}
+Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher.
+\newblock {WikiText}: A large language modeling corpus for open domain text.
+\newblock {\em arXiv preprint arXiv:1609.07843}, 2016.
+
+\bibitem{denseformer2024}
+Matteo Pagliardini, Amirkeivan Mohtashami, Fran{\c{c}}ois Fleuret, and Martin
+  Jaggi.
+\newblock Denseformer: Enhancing information flow in transformers via depth
+  weighted averaging.
+\newblock {\em arXiv preprint arXiv:2402.02622}, 2024.
+
+\bibitem{press2017tie}
+Ofir Press and Lior Wolf.
+\newblock Using the output embedding to improve language models.
+\newblock In {\em Proceedings of the 15th Conference of the European Chapter of
+  the Association for Computational Linguistics (EACL)}, 2017.
+
+\bibitem{radford2019gpt2}
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya
+  Sutskever.
+\newblock Language models are unsupervised multitask learners.
+\newblock Technical report, OpenAI, 2019.
+
+\bibitem{ravula2021realformer}
+Anirudh Ravula, Bhargav Kanagal, Joshua Ainslie, and Ruining He.
+\newblock Realformer: Transformer likes residual attention.
+\newblock {\em arXiv preprint arXiv:2012.11747}, 2021.
+
+\bibitem{vaswani2017attention}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones,
+  Aidan~N. Gomez, {\L}ukasz Kaiser, and Illia Polosukhin.
+\newblock Attention is all you need.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)},
+  2017.
+
+\bibitem{wang2022deepnet}
+Hongyu Wang, Shuming Ma, Li~Dong, Shaohan Huang, Dongdong Zhang, and Furu Wei.
+\newblock Deepnet: Scaling transformers to 1,000 layers.
+\newblock {\em arXiv preprint arXiv:2203.00555}, 2022.
+
+\bibitem{muddformer2025}
+Da~Xiao, Qingye Meng, Shengping Li, and Xingyuan Yuan.
+\newblock Muddformer: Breaking residual bottlenecks in transformers via
+  multiway dynamic dense connections.
+\newblock {\em arXiv preprint arXiv:2502.12170}, 2025.
+
+\bibitem{zhang2026residual}
+Yifan Zhang.
+\newblock Residual stream duality in modern transformer architectures.
+\newblock {\em arXiv preprint arXiv:2603.16039}, 2026.
+
+\end{thebibliography}

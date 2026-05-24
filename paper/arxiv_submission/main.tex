@@ -36,21 +36,16 @@ Hu Chaolang\thanks{Corresponding author: \texttt{huchaolang@scu.edu.cn}}\\
 \maketitle
 
 \begin{abstract}
-An autoregressive Transformer can be viewed as a two-dimensional computation graph over token position and layer depth. Standard self-attention makes information propagation along the token axis highly efficient: within each layer, a token can directly route information from its causal prefix, forming a dense lower-triangular communication pattern over positions. In contrast, information along the layer axis is still mainly carried by residual propagation, which transports earlier representations forward but does not provide query-conditioned access to specific earlier-layer states. This paper studies whether the same attention-based routing principle can also be introduced along the layer dimension. We propose layer-depth attention routing, which augments standard causal self-attention with a same-position cross-layer memory branch. The current implementation uses a single shared query for both row-wise token attention and depth-wise memory retrieval, and archives one projected historical K/V entry per block. Thus, each target token routes over both token-axis candidates and layer-axis memory candidates under a shared attention budget. On WikiText-103, across multiple settings including 8-layer and 16-layer models, different sequence lengths, and long training budgets, the method improves final test perplexity over strong Transformer baselines by 1.3\% to 3.1\%. Attention-allocation analyses further show that deeper layers assign substantial mass to the depth branch and selectively retrieve a small number of high-value early-layer memory slots. Moreover, the relative allocation between the row and depth branches remains broadly stable across token positions, suggesting that the added layer-depth pathway does not fade away as the token sequence becomes longer.
+Transformers propagate information effectively along the token dimension, but access to same-position representations formed at earlier layers remains indirect. We study whether a token at the current layer can benefit from directly reading its own depth history, rather than relying only on repeated residual propagation through the stack. To this end, we introduce a layer-depth attention routing mechanism that augments standard self-attention with a same-position cross-layer memory branch. In this paper, we instantiate and evaluate this idea in decoder-only language models. The current implementation uses a single shared query for row-wise token attention and depth-wise memory retrieval, and archives one projected historical K/V entry per block. On WikiText-103, across multiple settings including 8-layer and 16-layer models, different sequence lengths, and long training budgets, the method improves final test perplexity over strong Transformer baselines by 1.3\% to 3.1\%. 
+% Attention-allocation analyses further show that deeper layers assign substantial mass to the depth branch and selectively retrieve a small number of high-value early-layer memory slots, rather than ignoring the added pathway. Taken together, these results suggest that explicit depth history is a useful information source even for already strong decoder baselines, while also revealing a clear trade-off: the current prototype incurs noticeable runtime overhead.
+Attention-allocation analyses further show that deeper layers assign substantial mass to the depth branch and selectively retrieve a small number of high-value early-layer memory slots, rather than ignoring the added pathway. Moreover, the relative allocation between the row and depth branches remains broadly stable across token positions, suggesting that the added depth pathway does not fade away as the token sequence becomes longer.
+
+
 \end{abstract}
 
 \section{Introduction}
 
 Transformer language models are built around token-wise attention, where each layer reads contextual information from other positions in the sequence \cite{vaswani2017attention}. A useful way to interpret this architecture is as a two-dimensional computation graph over token positions and layer depth \cite{zhang2026residual}. Under this view, recurrent models mainly propagate information through chained local transitions, while self-attention sharply shortens communication along the token axis by allowing a token to access its prefix within one layer \cite{vaswani2017attention}. However, the same perspective also highlights a remaining asymmetry: representations formed by the same token at earlier layers are still only indirectly accessible in standard decoder-only Transformers.
-
-\begin{figure}[t]
-    \centering
-    \includegraphics[width=0.92\linewidth]{figures/figure1_information_propagation_schematic_v8.png}
-    \caption{Information-propagation view of autoregressive Transformer computation. Nodes represent hidden states arranged by token position and layer depth. Standard causal self-attention provides query-conditioned routing along the token axis, while depth-wise information is mainly carried through residual transport. The proposed layer-depth routing adds query-conditioned attention over same-position historical states, shortening a representative path from an early low-layer source to a late high-layer target. For clarity, only the incoming routing edges for one target node are shown; the same mechanism is applied throughout the sequence and layer stack.}
-    \label{fig:propagation-view}
-\end{figure}
-
-\Cref{fig:propagation-view} illustrates the distinction that motivates this work. The left panel shows that standard causal attention already gives the target node direct query-conditioned access to token-axis candidates. The same is not true along the layer axis: earlier same-position representations are mainly carried forward through residual transport. The right panel shows the proposed change: the target node can also query historical same-position states, turning part of the layer-axis communication into attention-based routing.
 
 Residual connections do provide a depth-wise transmission path, so standard Transformers are not entirely lacking in cross-layer communication \cite{he2016deep}. But this path is uniform and additive rather than selective: earlier-layer information is mixed forward through the residual stream, not explicitly retrieved on demand for the current token. As depth increases, useful earlier-layer signals may therefore be diluted among many subsequent transformations \cite{ravula2021realformer,kimi2026attnres,denseformer2024,dca2025,muddformer2025}. This motivates a simple question: can a decoder-only language model improve by augmenting token attention with a direct layer-depth memory branch? If the current token could jointly attend to both the usual row-wise prefix context and its own cross-layer history, then the model might reuse partially refined intermediate states more effectively instead of repeatedly reconstructing them through the stack.
 
@@ -84,34 +79,6 @@ More generally, we view the model as a directed computation graph whose nodes ar
 
 This motivation becomes stronger as depth increases. In a relatively shallow stack, useful early-layer features may still be transmitted adequately through the residual stream. In a deeper decoder, however, the same-position signal created near the bottom of the network must survive many additional attention and FFN transformations before it reaches the top. Residual connections mitigate this problem, but they do so passively: they carry earlier information forward additively rather than letting the current layer actively retrieve a specific earlier representation when needed. Our mechanism is intended as a more selective improvement. Instead of relying only on repeated residual mixing, the current layer is allowed to directly read earlier same-position states when those states remain useful. The attention analyses later in the paper are consistent with this interpretation, since deeper layers allocate more mass to the depth branch and often place that mass on a small number of very early historical entries.
 
-\subsection{Information Propagation View}
-
-The computation graph view makes the role of the proposed mechanism more explicit. Let the node \(x_t^{(l)}\) denote the hidden state at token position \(t\) and layer \(l\). In a standard causal Transformer, the target state at the next layer receives query-conditioned information from the token-axis candidate set
-\[
-\mathcal{R}_t^{(l)}=\{x_j^{(l)}:j\le t\}.
-\]
-This is the dense lower-triangular communication pattern induced by causal self-attention: for a fixed layer, the current token can query all prefix positions.
-
-In contrast, same-position information from earlier layers is mainly transported through the residual stream. This gives a valid depth-wise communication path, but the mechanism is different from attention. Residual propagation can be abstracted as query-free additive transport:
-\[
-y_{\mathrm{res}}=\sum_i \beta_i h_i,
-\]
-where \(h_i\) denotes historical components carried by the residual stream and the coefficients \(\beta_i\) are not selected by a query formed at the current target node. Such transport is useful for preserving information, but it does not let the current layer explicitly ask which earlier representation should be emphasized.
-
-Attention-based retrieval has a different form. Given the current state \(x\), it computes query-conditioned weights
-\[
-\alpha_i(x)=
-\frac{\exp(q(x)^\top k_i)}
-{\sum_j \exp(q(x)^\top k_j)}
-\]
-and reads
-\[
-y_{\mathrm{attn}}(x)=\sum_i \alpha_i(x)v_i.
-\]
-Thus, the key distinction is not merely whether information can reach a later layer, but whether the later layer can selectively query it. From this perspective, standard Transformer self-attention already provides query-conditioned routing along the token axis, while the layer axis remains dominated by residual-style passive transport. Layer-depth attention routing extends the same query-conditioned principle to same-position earlier-layer states.
-
-This distinction also clarifies why residual connections are not a substitute for the proposed branch. If a useful earlier-layer representation is mixed with many later transformations, residual propagation carries all of them forward together. A depth-attention branch can instead assign small weights to less relevant historical entries and concentrate probability mass on a few useful states. The empirical attention maps in \Cref{fig:row-depth-mass,fig:depth-by-position,fig:attention-analysis} are consistent with this interpretation: the trained model does not average uniformly over history, but selectively retrieves a compact set of early memory slots in deeper layers.
-
 \subsection{Row Attention and Depth Memory}
 
 For each layer, we keep the usual row-wise token attention branch over the current sequence. In parallel, we maintain a depth-memory archive consisting of same-position history from earlier layers. The current token then produces a single query that is used for two routing decisions:
@@ -137,82 +104,51 @@ Using a shared memory projection also makes the archive more coherent across lay
 
 \subsection{Layer Computation}
 
-At layer \(l\), let the current hidden sequence be
+At layer $l$, let the current hidden sequence be
 \[
-X^{(l)} = \{x_1^{(l)},\ldots,x_S^{(l)}\}\in \mathbb{R}^{B\times S\times D}.
+X^{(l)} \in \mathbb{R}^{B \times S \times D}.
 \]
-For a target position \(t\), standard causal self-attention routes information over the token-axis candidate set
+The row-attention branch first computes a fused token-attention projection:
 \[
-\mathcal{R}_t^{(l)}=\{x_j^{(l)}:j\le t\}.
+[Q_{\text{row}}, K_{\text{row}}, V_{\text{row}}] = W_{\text{qkv}} X^{(l)}.
 \]
-Our method augments this set with a layer-axis memory set containing same-position historical states:
+After reshaping into multi-head form, the model computes the standard causal token-attention scores over prefix positions:
 \[
-\mathcal{D}_t^{(l)}=\{h_t^{(k)}:k<l\},
-\]
-where \(h_t^{(k)}\) denotes the archived representation produced by an earlier block at the same token position. Thus, the target node \(x_t^{(l+1)}\) receives information from the union
-\[
-\mathcal{C}_t^{(l)}=\mathcal{R}_t^{(l)}\cup \mathcal{D}_t^{(l)}.
+A_{\text{row}} = \frac{Q_{\text{row}} K_{\text{row}}^\top}{\sqrt{d}}.
 \]
 
-The row branch computes the usual token-axis projections:
+For the depth-memory branch, the final design uses the same query as the row branch:
 \[
-q_t^{(l)} = W_q x_t^{(l)},\qquad
-k_j^{(l)} = W_k x_j^{(l)},\qquad
-v_j^{(l)} = W_v x_j^{(l)},\quad j\le t.
+Q_{\text{depth}} = Q_{\text{row}}.
 \]
-For the layer-axis memory branch, each archived state \(h_t^{(k)}\) is mapped into a shared retrieval space:
+The memory archive is built from previously produced block states. In the current implementation, each block contributes one same-position memory entry, so the archive for layer $l$ contains projected historical keys and values from earlier layers:
 \[
-k_{t,\mathrm{mem}}^{(k)} = W_k^{\mathrm{mem}}h_t^{(k)},\qquad
-v_{t,\mathrm{mem}}^{(k)} = W_v^{\mathrm{mem}}h_t^{(k)}.
+\mathcal{M}^{(l)} = \{(K_{\text{mem}}^{(1)}, V_{\text{mem}}^{(1)}), \ldots, (K_{\text{mem}}^{(m)}, V_{\text{mem}}^{(m)})\}.
 \]
-The same query \(q_t^{(l)}\) is used for both token-axis routing and layer-axis retrieval.
+Each historical entry is archived through learned projections:
+\[
+K_{\text{mem}} = W_k^{\text{mem}} H,\qquad V_{\text{mem}} = W_v^{\text{mem}} H,
+\]
+where $H$ denotes the corresponding block-level hidden state. In the current implementation, the memory projection matrices are shared across layers, so the historical archive is parameterized by global memory projections rather than separate per-layer memory heads.
 
-The token-axis and layer-axis scores are
+Given the memory archive, the current layer computes depth-memory scores by matching the current token query against the historical same-position keys:
 \[
-s_{t,j}^{\mathrm{row}}
-=
-\frac{q_t^{(l)\top}k_j^{(l)}}{\sqrt d},
-\qquad j\le t,
+A_{\text{depth}} = \frac{Q_{\text{depth}} \cdot K_{\text{mem}}}{\sqrt{d}}.
 \]
-and
+The key design choice is that row-wise token scores and depth-wise memory scores are concatenated and normalized jointly:
 \[
-s_{t,k}^{\mathrm{depth}}
-=
-\frac{q_t^{(l)\top}k_{t,\mathrm{mem}}^{(k)}}{\sqrt d},
-\qquad k<l.
+A = [A_{\text{row}}; A_{\text{depth}}],\qquad P = \operatorname{softmax}(A).
 \]
-Instead of normalizing the two branches independently, we concatenate both score sets and apply one joint softmax:
+This means the model does not make two independent attention decisions. Instead, it allocates one unified attention budget across two competing sources:
+\begin{itemize}[leftmargin=1.5em]
+    \item current-layer token context;
+    \item historical same-position depth memory.
+\end{itemize}
+The final output context is then the sum of the row-context aggregation and the memory-context aggregation:
 \[
-Z_t
-=
-\sum_{m\le t}\exp(s_{t,m}^{\mathrm{row}})
-+
-\sum_{r<l}\exp(s_{t,r}^{\mathrm{depth}}).
+O = O_{\text{row}} + O_{\text{depth}}.
 \]
-Therefore,
-\[
-\alpha_{t,j}^{\mathrm{row}}
-=
-\frac{\exp(s_{t,j}^{\mathrm{row}})}{Z_t},
-\qquad
-\alpha_{t,k}^{\mathrm{depth}}
-=
-\frac{\exp(s_{t,k}^{\mathrm{depth}})}{Z_t}.
-\]
-
-The resulting context vector is
-\[
-o_t^{(l)}
-=
-\sum_{j\le t}
-\alpha_{t,j}^{\mathrm{row}}v_j^{(l)}
-+
-\sum_{k<l}
-\alpha_{t,k}^{\mathrm{depth}}v_{t,\mathrm{mem}}^{(k)}.
-\]
-Thus, the next-layer representation is formed by query-conditioned routing over both the token axis and the layer axis. Standard Transformer attention corresponds to the special case where the second summation is absent. Conversely, if the depth-memory candidates are useful, the joint softmax can allocate part of the same attention budget to earlier same-position states.
-
-After this joint routing step, the block follows the standard Transformer computation, including output projection, residual connection, normalization, and FFN. The only architectural change is the addition of projected historical K/V entries and their participation in the joint attention normalization. \Cref{fig:architecture} summarizes the resulting block structure.
+Aside from the additional historical K/V projections and the enlarged joint attention-score tensor, the rest of the block computation follows the standard Transformer pattern, including the usual output projection, residual pathway, and FFN stack. \Cref{fig:architecture} summarizes the resulting block structure.
 
 \begin{figure}[t]
     \centering
@@ -245,7 +181,7 @@ Under the current $r=4$ setting, this becomes
 C_{\text{method}} \approx L\bigl(14BSD^2 + 2BS^2D\bigr) + BSD\,L(L-1).
 \]
 
-Thus, compared with the baseline, the method introduces an additional $2LBSD^2$ projection term and an additional $BSD\,L(L-1)$ depth-branch attention term for matching and value aggregation over historical slots. The main point is that the method adds a moderate but non-negligible amount of work on top of standard self-attention rather than replacing the Transformer computation wholesale.
+Thus, compared with the baseline, the method introduces an additional $2LBSD^2$ projection term and an additional $BSD\,L(L-1)$ depth-matching term. The main point is that the method adds a moderate but non-negligible amount of work on top of standard self-attention rather than replacing the Transformer computation wholesale.
 
 In memory terms, the relevant quantity in our experiments is training-time peak GPU memory. Relative to the baseline, the proposed method must retain additional historical K/V activations and intermediate depth-branch tensors, which increases training memory usage but does not change the overall order of growth with sequence length in the same dramatic way as introducing another full token-token attention matrix would. Empirically, the measured peak-memory increase is modest compared with the runtime slowdown, suggesting that the current prototype is more constrained by systems-level execution overhead than by raw storage growth alone.
 
@@ -259,12 +195,12 @@ All models in the main comparison use the same decoder-only Transformer backbone
 
 The main completed result pool already supports a coherent comparison across multiple settings:
 \begin{itemize}[leftmargin=1.5em]
-    \item 8-layer, \texttt{seq\_len}=256, 40{,}000 and 80{,}000 steps;
-    \item 16-layer, \texttt{seq\_len}=256, 80{,}000 steps;
-    \item 8-layer and 16-layer, \texttt{seq\_len}=512, 80{,}000 steps;
+    \item 8-layer, $seq\_len=256$, $40000$ and $80000$ steps;
+    \item 16-layer, $seq\_len=256$, $80000$ steps;
+    \item 8-layer, $seq\_len=512$, $80000$ steps;
     \item projected-K/V versus non-projected historical K/V.
 \end{itemize}
-Most runs use \texttt{d\_model}=384, \texttt{num\_heads}=8, \texttt{mlp\_ratio}=4, tied embeddings, and learned positional embeddings. This places the experiments in the same general decoder-only language-modeling regime as prior WikiText-103 Transformer studies \cite{baevski2018adaptive,dai2019transformerxl}.
+Most runs use $d\_model=384$, $num\_heads=8$, $mlp\_ratio=4$, tied embeddings, and learned positional embeddings. This places the experiments in the same general decoder-only language-modeling regime as prior WikiText-103 Transformer studies \cite{baevski2018adaptive,dai2019transformerxl}.
 
 Validation is performed periodically during training, while the test set is evaluated only at the end of the run. For this reason, we consistently report \textbf{Best Val PPL} and \textbf{Final Test PPL} rather than best test perplexity. Each reported result is the median of three runs under the same configuration; the observed variation is small enough that we do not list a separate variance column in the main table.
 
@@ -272,7 +208,7 @@ Validation is performed periodically during training, while the test set is eval
 
 Across all completed settings, the final \textbf{single-q + projected K/V} method consistently outperforms the standard Transformer baseline in both best validation perplexity and final test perplexity.
 
-In the 8-layer, \texttt{seq\_len}=256 setting, the method reduces final test perplexity from $34.53$ to $33.53$ at 40{,}000 steps, and from $28.47$ to $27.58$ at 80{,}000 steps. In the 16-layer, \texttt{seq\_len}=256 setting, it further reduces final test perplexity from $26.28$ to $25.54$. The gain also persists at longer context length: at \texttt{seq\_len}=512, the 8-layer model improves from $24.02$ to $23.46$, and the 16-layer model improves from $21.37$ to $21.09$.
+In the 8-layer, $seq\_len=256$ setting, the method reduces final test perplexity from $34.53$ to $33.53$ at $40000$ steps, and from $28.47$ to $27.58$ at $80000$ steps. In the 16-layer, $seq\_len=256$ setting, it further reduces final test perplexity from $26.28$ to $25.55$. The gain also persists at longer context length, where the 8-layer, $seq\_len=512$ setting improves from $24.03$ to $23.46$.
 
 Taken together, the currently completed settings show stable relative final-test-perplexity improvements ranging from 1.3\% to 3.1\% across model depth, context length, and training budget. Although the absolute gains are moderate rather than dramatic, they are consistent across all currently completed main settings. For completeness, validation-loss curves for the two main $seq\_len=256$ settings are provided in the appendix.
 
@@ -285,8 +221,8 @@ Taken together, the currently completed settings show stable relative final-test
         \toprule
         Method & Layers & Seq Len & Steps & Params (M) & Best Val PPL & Final Test PPL & Step Time (s) & Tokens/s & Peak GPU Mem (GB) \\
         \midrule
-        Baseline & 8  & 256 & 40000 & 33.59 & 33.55 & 34.53 & -- & -- & -- \\
-        Ours     & 8  & 256 & 40000 & 33.89 & 32.37 & 33.53 & -- & -- & -- \\
+        Baseline & 8  & 256 & 40000 & 33.59 & 33.55 & 34.53 &  &  &  \\
+        Ours     & 8  & 256 & 40000 & 33.89 & 32.37 & 33.53 &  &  &  \\
         Baseline & 8  & 256 & 80000 & 33.59 & 27.58 & 28.47 & 0.0826 & 24793.0 & 7.81 \\
         Ours     & 8  & 256 & 80000 & 33.89 & 26.51 & 27.58 & 0.1027 & 19939.0 & 8.44 \\
         Baseline & 16 & 256 & 80000 & 47.80 & 25.29 & 26.28 & 0.1263 & 16210.1 & 9.58 \\
@@ -306,7 +242,7 @@ Taken together, the currently completed settings show stable relative final-test
 
 Beyond perplexity, the attention analyses provide direct evidence that the added depth branch is functionally active rather than a passive architectural perturbation. The most basic statistic is the average attention mass assigned to the row branch versus the depth branch. In the 16-layer model, early layers remain dominated by row-wise token attention, but middle and late layers allocate substantially more mass to depth retrieval; in the deepest layers, the average depth mass becomes comparable to or slightly larger than the row mass, as shown in \Cref{fig:row-depth-mass}.
 
-This raw layer-wise increase must be interpreted carefully. Deeper layers also expose more memory slots, so part of the increase in total depth mass is structurally induced by a larger candidate set. We therefore inspect not only total row-vs-depth mass, but also where the depth mass is allocated in the joint attention maps. These views show that the model does not distribute attention uniformly over all available history. Instead, it exhibits a marked preference for a small set of early memory slots, especially those near the bottom of the network.
+This raw layer-wise increase must be interpreted carefully. Deeper layers also expose more memory slots, so part of the increase in total depth mass is structurally induced by a larger candidate set. We therefore also inspect slot-normalized views and the depth-slot heatmap. These show that the growth in total depth usage is only partly explained by slot count: even after accounting for the number of available historical slots, middle and late layers still retain nontrivial per-slot depth usage. More importantly, the slot-allocation heatmap shows that the model does not distribute attention uniformly over all available history. Instead, it exhibits a marked preference for a small set of early memory slots, especially those near the bottom of the network.
 
 \begin{figure}[t]
     \centering
@@ -354,7 +290,7 @@ The current ablation evidence indicates that the overall layer-depth routing ide
         Ours (single-q + projected K/V) & 8 & 256 & 80000 & 33.89 & 26.51 & 27.58 & 3.12\% & final method \\
         Ours w/o sublayer & 8 & 256 & 80000 & 33.89 & 26.77 & 27.81 & 2.31\% & block memory \\
         Ours w/o projected K/V & 8 & 256 & 80000 & 33.59 & 27.06 & 28.12 & 1.23\% & raw-history variant \\
-        Attention Residuals & 8 & 256 & 80000 & 33.60 & 33.47 & 32.57 & -14.40\% & related baseline \\
+        Attention Residuals & 8 & 256 & 80000 &33.60  & 33.47 & 32.57 & -- & related baseline \\
         \bottomrule
     \end{tabular}
     }
@@ -364,19 +300,11 @@ The current ablation evidence indicates that the overall layer-depth routing ide
 
 \section{Related Work}
 
-Modern decoder-only language models are built around causal self-attention over the token dimension \cite{vaswani2017attention,radford2019gpt2}. This design has proved extremely effective, and prior work has long emphasized that one of its key benefits is the drastic reduction of communication path length along the sequence axis compared with recurrent architectures \cite{vaswani2017attention}. Our work starts from the observation that this dense token-axis routing leaves a complementary axis less directly addressed: the depth history of the same token across previous layers \cite{zhang2026residual}.
+Modern decoder-only language models are built around causal self-attention over the token dimension \cite{vaswani2017attention,radford2019gpt2}. This design has proved extremely effective, and prior work has long emphasized that one of its key benefits is the drastic reduction of communication path length along the sequence axis compared with recurrent architectures \cite{vaswani2017attention}. Our work starts from the observation that this leaves a complementary axis underused, namely the depth history of the same token across previous layers \cite{zhang2026residual}.
 
-\paragraph{Token-axis context and memory.}
-A large body of work improves Transformers by extending the accessible context along the token or segment axis. Transformer-XL caches hidden states from previous segments and reuses them as memory for longer-range language modeling \cite{dai2019transformerxl}, while Compressive Transformers further compress older memories so that more distant context can remain accessible \cite{rae2019compressive}. Sparse-attention models such as Longformer and BigBird reduce the cost of long-context attention through structured local, global, or random attention patterns \cite{beltagy2020longformer,zaheer2020bigbird}. Other approaches augment attention with explicit memory systems: Memorizing Transformers retrieve from a non-differentiable key-value memory of recent activations \cite{wu2022memorizing}, Recurrent Memory Transformer introduces recurrent memory tokens for long sequences \cite{bulatov2022rmt}, and Infini-attention combines local attention with a compressive long-term memory to support very long contexts \cite{munkhdalai2024infini}. These methods are relevant because they show that Transformer performance can improve when useful information is made more directly retrievable. However, their primary target is the temporal or document-context axis. In contrast, our method keeps the ordinary causal token-attention branch and adds a same-position memory branch over previous layers of the current computation graph.
+A broad family of prior work has explored augmenting Transformers with memory mechanisms, recurrent state, cached history, or cross-layer interactions. Some methods enlarge the effective context window by storing additional information across segments or decoding steps, as in Transformer-XL \cite{dai2019transformerxl}; others revisit how repeated computation itself should be organized, as in Universal Transformer \cite{dehghani2018universal}; still others modify how information from different depths is reused through learned cross-layer aggregation or depth-wise routing \cite{ravula2021realformer,denseformer2024,dca2025,muddformer2025,kimi2026attnres}. Our method belongs most naturally to this last category, but with a narrower design goal: enabling a token at the current layer to retrieve its own same-position history from earlier layers.
 
-\paragraph{Depth-wise information flow and residual pathways.}
-Residual connections are the standard mechanism for moving information through depth \cite{he2016deep}, but they provide additive transport rather than query-conditioned retrieval. Several Transformer variants have therefore revisited how information is propagated or reused across layers. RealFormer adds residual connections over attention scores \cite{ravula2021realformer}, and DeepNet studies normalization and residual scaling for training extremely deep Transformers \cite{wang2022deepnet}. DenseFormer is especially close to our motivation: it introduces Depth-Weighted Averaging to combine current and previous hidden representations after Transformer blocks, showing that structured reuse of earlier activations can improve information flow and data efficiency \cite{denseformer2024}. However, DenseFormer performs learned depth-wise averaging over hidden states, whereas our method turns same-position earlier-layer states into projected K/V memory entries and retrieves them with the current token query. This distinction matters because our depth candidates compete directly with row-wise token candidates under a joint softmax, allowing each target token to adaptively allocate attention between the token axis and the layer-depth axis. Other related methods include DeepCrossAttention-style layer interactions \cite{dca2025}, MUDDFormer's dynamic dense connections \cite{muddformer2025}, and Attention Residuals, which replaces fixed residual accumulation with depth-wise attention over previous states \cite{kimi2026attnres}. Together, these works support the same broad premise as ours: useful information may be distributed across depth rather than only along the current layer's token axis.
-
-\paragraph{Computation across depth and parameter reuse.}
-Another related direction changes how repeated computation is organized across layers. Universal Transformer applies a recurrent computation scheme over depth and can be viewed as combining parallel sequence processing with recurrent refinement \cite{dehghani2018universal}. ALBERT shares parameters across layers to decouple representational depth from parameter count \cite{lan2019albert}. These methods demonstrate that depth should not be treated merely as independent stacked blocks. Our method is complementary: it does not share the whole block or replace the layer recurrence, but exposes earlier same-position states as explicit retrieval candidates inside a conventional decoder stack.
-
-\paragraph{Positioning.}
-The proposed layer-depth routing mechanism is therefore closest to cross-layer and residual-reuse methods, while borrowing the general memory-retrieval intuition from long-context Transformers. Its goal is narrower than long-context modeling and more structured than generic layer aggregation: for each token, the model jointly allocates one attention budget between row-wise prefix context and same-position depth history. This positioning also explains why our analysis focuses not only on perplexity, but on whether trained models actually allocate attention mass to the depth branch instead of ignoring the added pathway.
+Another nearby line of work asks whether standard residual propagation can be improved by learned aggregation across layers or modified residual-attention pathways \cite{ravula2021realformer,denseformer2024,dca2025,kimi2026attnres}. These methods are highly relevant to our motivation, since they likewise recognize that useful information may be distributed across depth rather than only along the current layer's token axis. However, our approach preserves the standard token-attention branch and organizes retrieval around same-position historical memory entries, rather than treating the entire layer stack as a generic pool for residual recombination. In this sense, it is also closely related to recent attempts to explicitly factor Transformer information flow into sequence and depth axes \cite{zhang2026residual}, while remaining complementary to depth-stabilization methods such as DeepNet \cite{wang2022deepnet}. Parameter-sharing work such as ALBERT \cite{lan2019albert} is also tangentially relevant, because it highlights that what matters across depth is not merely stacking more layers, but how information and computation are reused across them. Our method addresses that question from the retrieval side rather than from the parameter-sharing side.
 
 \section{Conclusion}
 
